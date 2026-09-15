@@ -545,6 +545,11 @@ struct Globals
 	int gFallbackScreenHeight;
 	bool gForceDetectColorSpace;
 
+	// Archive (ZIP VFS) settings. See d3dx.ini [Include]:
+	// archive_disk_fallback and max_archive_entry_size.
+	bool archive_disk_fallback = false;
+	UINT max_archive_entry_size = 64; // MiB
+
 	CRITICAL_SECTION mCriticalSection;
 
 	std::set<uint32_t> gVisitedVertexBufferSlotIds;

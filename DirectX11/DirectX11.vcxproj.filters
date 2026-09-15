@@ -14,6 +14,10 @@
     <ClCompile Include="FrameAnalysis.cpp" />
     <ClCompile Include="..\D3D_Shaders\Assembler.cpp" />
     <ClCompile Include="..\crc32c-hw-1.0.5\src\crc32c.cpp" />
+    <ClCompile Include="..\zstd-1.5.7\zstd.c" />
+    <ClCompile Include="..\miniz-3.0.2\miniz.c" />
+    <ClCompile Include="..\lzma-23.01\lzma.c" />
+    <ClCompile Include="Archive.cpp" />
     <ClCompile Include="CommandList.cpp" />
     <ClCompile Include="ResourceHash.cpp" />
     <ClCompile Include="HookedContext.cpp" />
@@ -52,6 +56,7 @@
     <ClInclude Include="..\util.h" />
     <ClInclude Include="..\version.h" />
     <ClInclude Include="..\crc32c-hw-1.0.5\include\crc32c.h" />
+    <ClInclude Include="Archive.h" />
     <ClInclude Include="CommandList.h" />
     <ClInclude Include="ResourceHash.h" />
     <ClInclude Include="HookedContext.h" />
