@@ -851,6 +851,105 @@ public:
 	void set_resource_type(D3D11_RESOURCE_DIMENSION type);
 	bool update_types_matched();
 };
+
+// A single filterable field on a resource. Unlike the scalar FuzzyMatch used
+// by FuzzyMatchResourceDesc, a FilterField collects every constraint written
+// for it in a [Filter] section (joined with '&'), and every constraint must
+// pass for the field to match. This allows lower & upper bounds on the same
+// field (e.g. match_height = >100 & <500).
+class FilterField {
+public:
+	bool empty() const { return values.empty(); }
+	void add(const FuzzyMatch &m) { values.push_back(m); }
+
+	// Matches the field value against a typed resource description. NOTE: Only
+	// safe to instantiate in translation units where FuzzyMatch::matches is
+	// defined (i.e. ResourceHash.cpp), so keep the call sites of these out of
+	// other files - use the concrete FilterMatch::matches() overloads instead.
+	template <typename DescType>
+	bool matches(UINT lhs, const DescType *desc) const
+	{
+		for (const FuzzyMatch &m : values) {
+			if (!m.matches(lhs, desc))
+				return false;
+		}
+		return true;
+	}
+
+	// Matches the field value directly (draw context fields, where the RHS of
+	// every constraint must be a literal value).
+	bool matches_uint(UINT lhs) const
+	{
+		for (const FuzzyMatch &m : values) {
+			if (!m.matches_uint(lhs))
+				return false;
+		}
+		return true;
+	}
+private:
+	std::vector<FuzzyMatch> values;
+};
+
+// Forward declaration to resolve the include cycle (CustomResource is defined
+// in CommandList.h, which includes this header):
+class CustomResource;
+
+// A single [Filter<Name>] section: a set of constraints on resource
+// descriptions (and optionally the draw context) that can be evaluated against
+// any resource from a command list via the `->Filter(<name>)` expression
+// member. Unlike a fuzzy [TextureOverride], a filter is pure - it never maps
+// to a TextureOverride, so evaluating one is cheap, and it can also match the
+// *declared* fields of a custom resource ([Resource...] section) rather than
+// only live D3D11 resources.
+class FilterMatch {
+public:
+	wstring name; // Lowercased section id, as registered in G->mFilters
+
+	bool matches_buffer;
+	bool matches_tex1d;
+	bool matches_tex2d;
+	bool matches_tex3d;
+
+	FilterField Usage;               // Common
+	FilterField BindFlags;           // Common
+	FilterField CPUAccessFlags;      // Common
+	FilterField MiscFlags;           // Common
+	FilterField ByteWidth;           // Buffer+StructuredBuffer
+	FilterField StructureByteStride; // StructuredBuffer
+	FilterField MipLevels;           // 1D+2D+3D
+	FilterField Format;              // 1D+2D+3D
+	FilterField Width;               // 1D+2D+3D
+	FilterField Height;              //    2D+3D
+	FilterField Depth;               //       3D
+	FilterField ArraySize;           // 1D+2D
+	FilterField SampleDesc_Count;    //    2D
+	FilterField SampleDesc_Quality;  //    2D
+
+	// Draw context fields, evaluated against the DrawCallInfo of the current
+	// command list run (e.g. match_index_count = >6):
+	FilterField FirstVertex;
+	FilterField FirstIndex;
+	FilterField FirstInstance;
+	FilterField VertexCount;
+	FilterField IndexCount;
+	FilterField InstanceCount;
+
+	FilterMatch();
+	bool matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const CustomResource *resource, const DrawCallInfo *call_info) const;
+
+	void set_resource_type(D3D11_RESOURCE_DIMENSION type);
+	bool update_types_matched();
+
+private:
+	bool matches_draw_conditions(const DrawCallInfo *call_info) const;
+};
+
+typedef std::map<std::wstring, std::shared_ptr<FilterMatch>> FilterMatches;
+
 bool TextureOverrideLess(const struct TextureOverride &lhs, const struct TextureOverride &rhs);
 struct FuzzyMatchResourceDescLess {
 	bool operator() (const std::shared_ptr<FuzzyMatchResourceDesc> &lhs, const std::shared_ptr<FuzzyMatchResourceDesc> &rhs) const;

@@ -606,6 +606,10 @@ struct Globals
 	TextureOverrideMap mTextureOverrideMap;
 	FuzzyTextureOverrides mFuzzyTextureOverrides;
 
+	// [Filter<Name>] sections, keyed by lowercased full section id (mirrors
+	// customResources):
+	FilterMatches mFilters;
+
 	std::unordered_map<UINT64, ShaderModelCacheEntry> mShaderModelCache;
 
 	CRITICAL_SECTION mShaderBindingsLock;

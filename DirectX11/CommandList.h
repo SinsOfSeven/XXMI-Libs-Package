@@ -849,6 +849,9 @@ enum class ResourceCopyTargetEvaluationMode : uint32_t {
 
 	POOL_MASK                = 0b00000000001111111000000000000000,
 
+	// FILTER
+	RESOURCE_FILTER        = 0b00000000100000000000000000000000,
+
 	// VARIABLE
 	VARIABLE                 = 0b00000000010000000000000000000000,
 
@@ -885,6 +888,8 @@ static EnumName_t<const wchar_t*, ResourceCopyTargetEvaluationMode> ResourceCopy
 	{L"SlotRange", ResourceCopyTargetEvaluationMode::SLOT_RANGE},
 
 	{L"Variable", ResourceCopyTargetEvaluationMode::VARIABLE},
+
+	{L"ResourceFilter", ResourceCopyTargetEvaluationMode::RESOURCE_FILTER},
 
 	{L"LayoutElementFormat", ResourceCopyTargetEvaluationMode::LAYOUT_ELEMENT_FORMAT},
 	{L"LayoutElementOffset", ResourceCopyTargetEvaluationMode::LAYOUT_ELEMENT_OFFSET},
@@ -1031,11 +1036,14 @@ public:
 	std::unique_ptr<CommandListExpression> range_start = nullptr;
 	std::unique_ptr<CommandListExpression> range_end = nullptr;
 
+	// Filter names are resolved while parsing expression operands.
+	const FilterMatch* filter = nullptr;
+
 	bool forbid_view_cache = false;
 
 	// allow_range: accept ps-t[$a:$b] / PoolFoo[$a:$b] / bare ps-t targets,
 	// only meaningful for commands that iterate the range.
-	bool ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom = true, bool allow_range = false);
+	bool ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom = true, bool allow_range = false, bool allow_filter = false);
 	bool IsRange() const;
 
 	// Slot for this draw, or UINT_MAX (with a warning) if a dynamic slot
@@ -1089,6 +1097,12 @@ public:
 	float GetResourceMips(CommandListState* state);
 	D3D11_BIND_FLAG GetResourceBindFlags(CommandListState *state);
 	float GetPoolElementLastFrame(CommandListState* state);
+
+	// Evaluates the `->Filter(<name>)` member against the target resource.
+	// Returns 1.0 (match), 0.0 (resource bound but filter did not match) or
+	// -0.0 (resource could not be resolved), matching the bare texture filter
+	// expression convention for unbound resources.
+	float EvaluateResourceFilter(CommandListState* state);
 
 	D3D11_BIND_FLAG BindFlags(CommandListState *state, D3D11_RESOURCE_MISC_FLAG *misc_flags=NULL);
 

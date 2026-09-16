@@ -3217,6 +3217,9 @@ float CommandListOperand::process_texture_filter(CommandListState *state)
 			else
 				return -1.0f;
 
+		case ResourceCopyTargetEvaluationMode::RESOURCE_FILTER:
+			return texture_filter_target.EvaluateResourceFilter(state);
+
 		default:
 			return 0.0f;
 	}
@@ -5977,7 +5980,8 @@ bool CommandListOperand::parse_slot(const wstring* operand, const wstring* ini_n
 bool CommandListOperand::parse_target(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope)
 {
 	int ret;
-	ret = texture_filter_target.ParseTarget(operand->c_str(), true, ini_namespace, scope);
+	// Expression operands are the only place a `->Filter(<name>)` member is valid:
+	ret = texture_filter_target.ParseTarget(operand->c_str(), true, ini_namespace, scope, true, false, true);
 	if (ret) {
 		type = ParamOverrideType::TEXTURE;
 		return operand_allowed_in_context(type, scope);
@@ -8158,6 +8162,9 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 		{ L"->width",          7, ResourceCopyTargetEvaluationMode::RESOURCE_WIDTH },
 		{ L"->offset",         8, ResourceCopyTargetEvaluationMode::RESOURCE_OFFSET },
 		{ L"->stride",         8, ResourceCopyTargetEvaluationMode::RESOURCE_STRIDE },
+		{ L"->filter",         8, ResourceCopyTargetEvaluationMode::RESOURCE_FILTER, {{
+			MemberArg::Type::String   // Filter Name
+		}} },
 		{ L"->format",         8, ResourceCopyTargetEvaluationMode::RESOURCE_FORMAT },
 		{ L"->height",         8, ResourceCopyTargetEvaluationMode::RESOURCE_HEIGHT },
 		{ L"->region",         8, ResourceCopyTargetEvaluationMode::RESOURCE_REGION, {{
@@ -8187,7 +8194,30 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 		}} },
 	};
 
-	return SyntaxTarget::ParseTargetMember(members, target, length, temp_target, evaluation_mode, ini_namespace, scope);
+	IniParserResult ret = SyntaxTarget::ParseTargetMember(members, target, length, temp_target, evaluation_mode, ini_namespace, scope);
+
+	if (ret == IniParserResult::TOKEN_FOUND
+			&& evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_FILTER)
+	{
+		// Resolve the filter name (already lower cased along with the rest of
+		// the command list line) to the registered [Filter<Name>] section.
+		wstring filter_name = member_args[0].constant_string;
+		wstring namespaced_section;
+
+		FilterMatches::iterator it = G->mFilters.end();
+		if (get_namespaced_section_name_lower(&filter_name, ini_namespace, &namespaced_section))
+			it = G->mFilters.find(namespaced_section);
+		if (it == G->mFilters.end())
+			it = G->mFilters.find(filter_name);
+		if (it == G->mFilters.end()) {
+			LogOverlayW(LOG_WARNING, L"Unknown filter \"%ls\"\n", filter_name.c_str());
+			return IniParserResult::SYNTAX_ERROR;
+		}
+
+		filter = it->second.get();
+	}
+
+	return ret;
 }
 
 IniParserResult ResourceCopyTarget::ParseTargetCustomResource(const wchar_t*& target, size_t length, const wstring* ini_namespace, CommandListScope* scope)
@@ -8197,7 +8227,8 @@ IniParserResult ResourceCopyTarget::ParseTargetCustomResource(const wchar_t*& ta
 		return IniParserResult::TOKEN_NOT_FOUND;
 
 	// Exit early for non-resource type evaluation modes (essentially on invalid syntax)
-	if (!(evaluation_mode & ResourceCopyTargetEvaluationMode::RESOURCE_MASK))
+	if (!(evaluation_mode & ResourceCopyTargetEvaluationMode::RESOURCE_MASK)
+			&& evaluation_mode != ResourceCopyTargetEvaluationMode::RESOURCE_FILTER)
 		return IniParserResult::SYNTAX_ERROR;
 
 	// section name should already have been transformed to lower
@@ -8592,7 +8623,7 @@ bool ResourceCopyTarget::AcceptParsedTarget(IniParserResult ret, bool allow_rang
 	return ret == IniParserResult::TOKEN_FOUND && (allow_range || !IsRange());
 }
 
-bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom, bool allow_range)
+bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom, bool allow_range, bool allow_filter)
 {
 	IniParserResult ret;
 	size_t length = wcslen(target);
@@ -8624,6 +8655,11 @@ bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, cons
 		ret = ParseTargetMember(target, length, temp_target, ini_namespace, scope);
 		//LogInfo("ParseTarget: %d at ParseTargetMember\n", ret);
 		if (ret == IniParserResult::SYNTAX_ERROR)
+			return false;
+
+		// `->Filter(<name>)` is a value-only selector that is only meaningful
+		// as an expression operand, so it is rejected everywhere else:
+		if (evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_FILTER && !allow_filter)
 			return false;
 
 		// Parse the remainder as a custom resource (e.g. `ResourceFoo`).
@@ -11033,6 +11069,66 @@ float ResourceCopyTarget::GetPoolElementLastFrame(CommandListState* state)
 	CustomResourcePool* pool = custom_resource_pool->ResolvePool();
 
 	return (float)pool->GetLastUpdateFrame(id, false);
+}
+
+float ResourceCopyTarget::EvaluateResourceFilter(CommandListState* state)
+{
+	if (!filter)
+		return 0.0f;
+
+	if (type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
+		// Match the *declared* resource description without substantiating it:
+		CustomResource* custom_resource = GetCustomResource(state);
+		if (!custom_resource)
+			return -0.0f;
+
+		return filter->matches(custom_resource, state->call_info) ? 1.0f : 0.0f;
+	}
+
+	ID3D11View* view = nullptr;
+	ID3D11Resource* resource = GetResource(
+		state, &view, nullptr, nullptr, nullptr, nullptr, nullptr);
+
+	if (!resource)
+		return -0.0f;
+
+	bool matched = false;
+
+	D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+	resource->GetType(&dimension);
+
+	switch (dimension) {
+		case D3D11_RESOURCE_DIMENSION_BUFFER: {
+			D3D11_BUFFER_DESC desc;
+			static_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
+			matched = filter->matches(&desc, state->call_info);
+			break;
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
+			D3D11_TEXTURE1D_DESC desc;
+			static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
+			matched = filter->matches(&desc, state->call_info);
+			break;
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
+			D3D11_TEXTURE2D_DESC desc;
+			static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
+			matched = filter->matches(&desc, state->call_info);
+			break;
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
+			D3D11_TEXTURE3D_DESC desc;
+			static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
+			matched = filter->matches(&desc, state->call_info);
+			break;
+		}
+	}
+
+	if (view)
+		view->Release();
+	resource->Release();
+
+	return matched ? 1.0f : 0.0f;
 }
 
 #pragma endregion ResourceCopyTarget
