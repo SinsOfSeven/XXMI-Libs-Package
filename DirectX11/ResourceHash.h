@@ -896,8 +896,9 @@ class CustomResource;
 
 // A single [Filter<Name>] section: a set of constraints on resource
 // descriptions (and optionally the draw context) that can be evaluated against
-// any resource from a command list via the `->Filter(<name>)` expression
-// member. Unlike a fuzzy [TextureOverride], a filter is pure - it never maps
+// any resource from a command list via the `->Filter(<expression>)` member
+// (see FilterExpr for how several filters are combined). Unlike a fuzzy
+// [TextureOverride], a filter is pure - it never maps
 // to a TextureOverride, so evaluating one is cheap, and it can also match the
 // *declared* fields of a custom resource ([Resource...] section) rather than
 // only live D3D11 resources.
@@ -946,6 +947,46 @@ public:
 
 private:
 	bool matches_draw_conditions(const DrawCallInfo *call_info) const;
+};
+
+// Composes [Filter<Name>] sections with the boolean operators accepted inside
+// the `->Filter(<expression>)` member:
+//
+//   !   NOT   (prefix, highest precedence)
+//   &   AND
+//   ^   XOR
+//   |   OR    (lowest precedence)
+//
+// Operands are filter names, resolved against G->mFilters. Each operator is a
+// unique glyph - there are no aliases (`&&`, `||`, `~` and word forms are
+// syntax errors). Evaluation short-circuits and reuses a single resource fetch
+// for the whole tree.
+//
+// TODO: grouping parentheses are not supported yet - `extract_arguments`
+// (CommandList.cpp) scans for the last `(` and needs a balanced scan first.
+enum class FilterExprOp {
+	LEAF,
+	AND,
+	OR,
+	XOR,
+	NOT,
+};
+
+class FilterExpr {
+public:
+	FilterExprOp op = FilterExprOp::LEAF;
+
+	// Set for LEAF, null otherwise.
+	std::shared_ptr<const FilterMatch> leaf;
+
+	// Set for AND/OR/XOR (one or more children) and NOT (exactly one child).
+	std::vector<std::shared_ptr<const FilterExpr>> children;
+
+	bool matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const CustomResource *resource, const DrawCallInfo *call_info) const;
 };
 
 typedef std::map<std::wstring, std::shared_ptr<FilterMatch>> FilterMatches;

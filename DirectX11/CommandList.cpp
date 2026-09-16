@@ -5980,7 +5980,7 @@ bool CommandListOperand::parse_slot(const wstring* operand, const wstring* ini_n
 bool CommandListOperand::parse_target(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope)
 {
 	int ret;
-	// Expression operands are the only place a `->Filter(<name>)` member is valid:
+	// Expression operands are the only place a `->Filter(<expression>)` member is valid:
 	ret = texture_filter_target.ParseTarget(operand->c_str(), true, ini_namespace, scope, true, false, true);
 	if (ret) {
 		type = ParamOverrideType::TEXTURE;
@@ -7896,6 +7896,9 @@ IniParserResult SyntaxTarget::extract_arguments(const wchar_t* target, size_t& l
 	if (length == 0 || target[length - 1] != L')')
 		return IniParserResult::TOKEN_NOT_FOUND;
 
+	// TODO: This scans for the last '(' only, so a member argument cannot
+	// contain grouping parentheses (e.g. `->Filter((A | B) & C)`). Supporting
+	// them needs a balanced scan for the outermost '(' instead.
 	const wchar_t* open = wcsrchr(target, L'(');
 
 	if (!open || open <= target)
@@ -8142,6 +8145,187 @@ IniParserResult ResourceCopyTarget::ParseTargetPrefix(const wchar_t*& target, si
 	return IniParserResult::TOKEN_NOT_FOUND;
 }
 
+namespace {
+
+// Parses a filter expression as accepted by the `->Filter(<expression>)`
+// member, e.g. `Filter2k | !Filter4k`. Grammar, highest precedence first:
+//
+//   unary := '!' unary | name
+//   and   := unary ( '&' unary )*
+//   xor   := and   ( '^' and   )*
+//   or    := xor   ( '|' xor   )*
+//
+// Each operand is a [Filter<Name>] section name, resolved namespaced-first then
+// plain. Returns null and logs a warning on a syntax error or unknown name.
+class FilterExpressionParser
+{
+public:
+	FilterExpressionParser(const std::wstring &text, const std::wstring *ini_namespace)
+		: m_text(text), m_namespace(ini_namespace) {}
+
+	std::shared_ptr<const FilterExpr> parse()
+	{
+		skip_spaces();
+		if (at_end()) {
+			LogOverlayW(LOG_WARNING, L"Empty filter expression\n");
+			return nullptr;
+		}
+
+		std::shared_ptr<const FilterExpr> expr = parse_or();
+		if (!expr)
+			return nullptr;
+
+		skip_spaces();
+		if (!at_end()) {
+			LogOverlayW(LOG_WARNING, L"Unexpected token in filter expression: \"%ls\"\n",
+				m_text.c_str() + m_pos);
+			return nullptr;
+		}
+
+		return expr;
+	}
+
+private:
+	bool at_end() const { return m_pos >= m_text.size(); }
+
+	wchar_t peek() const { return at_end() ? L'\0' : m_text[m_pos]; }
+
+	void skip_spaces()
+	{
+		while (!at_end() && (m_text[m_pos] == L' ' || m_text[m_pos] == L'\t'))
+			m_pos++;
+	}
+
+	static bool is_operator(wchar_t c)
+	{
+		return c == L'!' || c == L'&' || c == L'^' || c == L'|';
+	}
+
+	static std::shared_ptr<const FilterExpr> make_node(FilterExprOp op,
+			std::shared_ptr<const FilterExpr> lhs, std::shared_ptr<const FilterExpr> rhs)
+	{
+		std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
+		node->op = op;
+		node->children.push_back(std::move(lhs));
+		node->children.push_back(std::move(rhs));
+		return node;
+	}
+
+	std::shared_ptr<const FilterExpr> parse_or()
+	{
+		std::shared_ptr<const FilterExpr> lhs = parse_xor();
+		if (!lhs)
+			return nullptr;
+
+		while (true) {
+			skip_spaces();
+			if (peek() != L'|')
+				return lhs;
+			m_pos++;
+			std::shared_ptr<const FilterExpr> rhs = parse_xor();
+			if (!rhs)
+				return nullptr;
+			lhs = make_node(FilterExprOp::OR, std::move(lhs), std::move(rhs));
+		}
+	}
+
+	std::shared_ptr<const FilterExpr> parse_xor()
+	{
+		std::shared_ptr<const FilterExpr> lhs = parse_and();
+		if (!lhs)
+			return nullptr;
+
+		while (true) {
+			skip_spaces();
+			if (peek() != L'^')
+				return lhs;
+			m_pos++;
+			std::shared_ptr<const FilterExpr> rhs = parse_and();
+			if (!rhs)
+				return nullptr;
+			lhs = make_node(FilterExprOp::XOR, std::move(lhs), std::move(rhs));
+		}
+	}
+
+	std::shared_ptr<const FilterExpr> parse_and()
+	{
+		std::shared_ptr<const FilterExpr> lhs = parse_unary();
+		if (!lhs)
+			return nullptr;
+
+		while (true) {
+			skip_spaces();
+			if (peek() != L'&')
+				return lhs;
+			m_pos++;
+			std::shared_ptr<const FilterExpr> rhs = parse_unary();
+			if (!rhs)
+				return nullptr;
+			lhs = make_node(FilterExprOp::AND, std::move(lhs), std::move(rhs));
+		}
+	}
+
+	std::shared_ptr<const FilterExpr> parse_unary()
+	{
+		skip_spaces();
+		if (peek() == L'!') {
+			m_pos++;
+			std::shared_ptr<const FilterExpr> child = parse_unary();
+			if (!child)
+				return nullptr;
+			std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
+			node->op = FilterExprOp::NOT;
+			node->children.push_back(std::move(child));
+			return node;
+		}
+		return parse_name();
+	}
+
+	std::shared_ptr<const FilterExpr> parse_name()
+	{
+		skip_spaces();
+
+		size_t start = m_pos;
+		while (!at_end() && !is_operator(m_text[m_pos])
+				&& m_text[m_pos] != L' ' && m_text[m_pos] != L'\t')
+			m_pos++;
+
+		if (m_pos == start) {
+			LogOverlayW(LOG_WARNING, L"Expected a filter name in filter expression: \"%ls\"\n",
+				m_text.c_str() + m_pos);
+			return nullptr;
+		}
+
+		return resolve(m_text.substr(start, m_pos - start));
+	}
+
+	std::shared_ptr<const FilterExpr> resolve(std::wstring filter_name)
+	{
+		std::wstring namespaced_section;
+
+		FilterMatches::iterator it = G->mFilters.end();
+		if (get_namespaced_section_name_lower(&filter_name, m_namespace, &namespaced_section))
+			it = G->mFilters.find(namespaced_section);
+		if (it == G->mFilters.end())
+			it = G->mFilters.find(filter_name);
+		if (it == G->mFilters.end()) {
+			LogOverlayW(LOG_WARNING, L"Unknown filter \"%ls\"\n", filter_name.c_str());
+			return nullptr;
+		}
+
+		std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
+		node->op = FilterExprOp::LEAF;
+		node->leaf = it->second;
+		return node;
+	}
+
+	const std::wstring &m_text;
+	const std::wstring *m_namespace;
+	size_t m_pos = 0;
+};
+
+} // namespace
+
 IniParserResult ResourceCopyTarget::ParseTargetMember(
 	const wchar_t*& target, size_t& length, wstring& temp_target, const wstring* ini_namespace, CommandListScope* scope
 )
@@ -8163,7 +8347,7 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 		{ L"->offset",         8, ResourceCopyTargetEvaluationMode::RESOURCE_OFFSET },
 		{ L"->stride",         8, ResourceCopyTargetEvaluationMode::RESOURCE_STRIDE },
 		{ L"->filter",         8, ResourceCopyTargetEvaluationMode::RESOURCE_FILTER, {{
-			MemberArg::Type::String   // Filter Name
+			MemberArg::Type::String   // Filter Expression
 		}} },
 		{ L"->format",         8, ResourceCopyTargetEvaluationMode::RESOURCE_FORMAT },
 		{ L"->height",         8, ResourceCopyTargetEvaluationMode::RESOURCE_HEIGHT },
@@ -8199,22 +8383,13 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 	if (ret == IniParserResult::TOKEN_FOUND
 			&& evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_FILTER)
 	{
-		// Resolve the filter name (already lower cased along with the rest of
-		// the command list line) to the registered [Filter<Name>] section.
-		wstring filter_name = member_args[0].constant_string;
-		wstring namespaced_section;
-
-		FilterMatches::iterator it = G->mFilters.end();
-		if (get_namespaced_section_name_lower(&filter_name, ini_namespace, &namespaced_section))
-			it = G->mFilters.find(namespaced_section);
-		if (it == G->mFilters.end())
-			it = G->mFilters.find(filter_name);
-		if (it == G->mFilters.end()) {
-			LogOverlayW(LOG_WARNING, L"Unknown filter \"%ls\"\n", filter_name.c_str());
+		// Parse the filter expression (already lower cased along with the rest
+		// of the command list line) against the registered [Filter<Name>]
+		// sections, e.g. `Filter2k | !Filter4k`.
+		FilterExpressionParser parser(member_args[0].constant_string, ini_namespace);
+		filter = parser.parse();
+		if (!filter)
 			return IniParserResult::SYNTAX_ERROR;
-		}
-
-		filter = it->second.get();
 	}
 
 	return ret;
@@ -8657,7 +8832,7 @@ bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, cons
 		if (ret == IniParserResult::SYNTAX_ERROR)
 			return false;
 
-		// `->Filter(<name>)` is a value-only selector that is only meaningful
+		// `->Filter(<expression>)` is a value-only selector that is only meaningful
 		// as an expression operand, so it is rejected everywhere else:
 		if (evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_FILTER && !allow_filter)
 			return false;

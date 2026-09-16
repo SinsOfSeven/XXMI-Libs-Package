@@ -1919,6 +1919,69 @@ bool FilterMatch::update_types_matched()
 	return matches_buffer || matches_tex1d || matches_tex2d || matches_tex3d;
 }
 
+// Shared recursive evaluation for FilterExpr. Keeping the recursion in a
+// template lets the concrete FilterMatch::matches() overloads be resolved by
+// the caller's descriptor type.
+template <typename DescType>
+static bool filter_expr_matches(const FilterExpr &expr, const DescType *desc, const DrawCallInfo *call_info)
+{
+	switch (expr.op) {
+		case FilterExprOp::LEAF:
+			return expr.leaf && expr.leaf->matches(desc, call_info);
+		case FilterExprOp::AND:
+			for (const auto &child : expr.children) {
+				if (child && !filter_expr_matches(*child, desc, call_info))
+					return false;
+			}
+			return true;
+		case FilterExprOp::OR:
+			for (const auto &child : expr.children) {
+				if (child && filter_expr_matches(*child, desc, call_info))
+					return true;
+			}
+			return false;
+		case FilterExprOp::XOR: {
+			// Odd number of true children, so binary XOR is the base case and
+			// the operator stays associative for longer chains.
+			bool result = false;
+			for (const auto &child : expr.children) {
+				if (child && filter_expr_matches(*child, desc, call_info))
+					result = !result;
+			}
+			return result;
+		}
+		case FilterExprOp::NOT:
+			return expr.children.size() == 1
+				&& !filter_expr_matches(*expr.children[0], desc, call_info);
+	}
+	return false;
+}
+
+bool FilterExpr::matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const
+{
+	return filter_expr_matches(*this, desc, call_info);
+}
+
+bool FilterExpr::matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const
+{
+	return filter_expr_matches(*this, desc, call_info);
+}
+
+bool FilterExpr::matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const
+{
+	return filter_expr_matches(*this, desc, call_info);
+}
+
+bool FilterExpr::matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const
+{
+	return filter_expr_matches(*this, desc, call_info);
+}
+
+bool FilterExpr::matches(const CustomResource *resource, const DrawCallInfo *call_info) const
+{
+	return filter_expr_matches(*this, resource, call_info);
+}
+
 static bool matches_draw_info(TextureOverride *tex_override, DrawCallInfo *call_info)
 {
 	if (!tex_override->has_draw_context_match)

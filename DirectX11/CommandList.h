@@ -1036,8 +1036,10 @@ public:
 	std::unique_ptr<CommandListExpression> range_start = nullptr;
 	std::unique_ptr<CommandListExpression> range_end = nullptr;
 
-	// Filter names are resolved while parsing expression operands.
-	const FilterMatch* filter = nullptr;
+	// Set when the target carries a `->Filter(<expression>)` member
+	// (RESOURCE_FILTER). The tree composes [Filter<Name>] sections with the
+	// boolean operators `!`, `&`, `^` and `|`.
+	std::shared_ptr<const FilterExpr> filter;
 
 	bool forbid_view_cache = false;
 
@@ -1098,7 +1100,7 @@ public:
 	D3D11_BIND_FLAG GetResourceBindFlags(CommandListState *state);
 	float GetPoolElementLastFrame(CommandListState* state);
 
-	// Evaluates the `->Filter(<name>)` member against the target resource.
+	// Evaluates the `->Filter(<expression>)` member against the target resource.
 	// Returns 1.0 (match), 0.0 (resource bound but filter did not match) or
 	// -0.0 (resource could not be resolved), matching the bare texture filter
 	// expression convention for unbound resources.

@@ -186,11 +186,12 @@ The same data caching rules as for [`HashRegion`](#hashregionbyte_offset-byte_si
 
 ### `Filter`
 
-Evaluates a `[Filter<Name>]` section against the resource and returns `1.0` if it matches, `0.0` if it does not, or `-0.0` if the resource is unbound. The name is the full `[Filter<Name>]` section name (matching is case-insensitive).
+Evaluates a `[Filter<Name>]` section against the resource and returns `1.0` if it matches, `0.0` if it does not, or `-0.0` if the resource is unbound. The operand is a filter name (the full `[Filter<Name>]` section name, matching is case-insensitive) or a boolean expression combining several filters with `!` (NOT), `&` (AND), `^` (XOR) and `|` (OR).
 
 ```ini
 $is_2k = ps-t0->Filter(Filter2k)
-if ResourceFoo->Filter(Filter2k)
+$is_large = ps-t0->Filter(Filter2k | Filter4k)
+if ResourceFoo->Filter(Filter2k & !Filter4k)
     ; Do something
 endif
 ```
