@@ -1499,7 +1499,17 @@ static UINT get_index_count_from_current_ib(ID3D11DeviceContext *mOrigContext1)
 	return 0;
 }
 
-void DrawCommand::do_indirect_draw_call(CommandListState *state, char *name,
+// Clears the per-draw metadata before a draw command runs, so
+// previous_draw_type reflects the most recent draw to actually execute and
+// leaves nothing stale from an earlier draw in the same command list run. The
+// run-scoped accumulated counts are deliberately left untouched - they reset
+// once when the run starts instead, so they keep summing across every draw.
+static void ResetPreviousDraw(CommandListState *state)
+{
+	state->previous_draw_type = 0;
+}
+
+void DrawCommand::do_indirect_draw_call(CommandListState *state, char *name, UINT draw_call_type,
 		void (__stdcall ID3D11DeviceContext::*IndirectDrawCall)(THIS_
 		ID3D11Buffer *pBufferForArgs,
 		UINT AlignedByteOffsetForArgs))
@@ -1525,6 +1535,12 @@ void DrawCommand::do_indirect_draw_call(CommandListState *state, char *name,
 	COMMAND_LIST_LOG(state, "[%S] %s(%p, %u)\n", ini_section.c_str(), name, resource, arg);
 
 	(state->mOrigContext1->*IndirectDrawCall)((ID3D11Buffer*)resource, arg);
+
+	// The draw counts are read from the args buffer by the GPU, so we can't
+	// accumulate them here. Still record that a draw executed and let
+	// previous_draw_type say which kind of indirect call it was:
+	ResetPreviousDraw(state);
+	state->previous_draw_type = draw_call_type;
 
 	resource->Release();
 }
@@ -1552,6 +1568,19 @@ void DrawCommand::run(CommandListState *state)
 		return;
 	}
 
+	// The accumulated counts describe what has been written into the
+	// currently bound stream output buffer, so they only accumulate while a
+	// stream output is bound. The binding generation changes on every
+	// SOSetTargets call, Reset()-ing the totals so a (re)bind mid-run starts
+	// a fresh count (a fresh run starts with so_generation 0 and adopts the
+	// current generation on its first draw without resetting anything).
+	unsigned so_generation = mHackerContext ? mHackerContext->GetStreamOutputBindingGeneration() : 0;
+	if (so_generation != state->accumulated.so_generation) {
+		state->accumulated.Reset();
+		state->accumulated.so_generation = so_generation;
+	}
+	bool stream_output_bound = mHackerContext && mHackerContext->IsStreamOutputBound();
+
 	// Plug input layout override right before a custom draw call.
 	if (!state->input_layout_overrides.empty()) {
 		UpdateInputLayout(ini_section.c_str(), state);
@@ -1568,39 +1597,65 @@ void DrawCommand::run(CommandListState *state)
 			eval_args(2, eargs, state);
 			COMMAND_LIST_LOG(state, "[%S] Draw(%u, %u)\n", ini_section.c_str(), eargs[0], eargs[1]);
 			mOrigContext1->Draw(eargs[0], eargs[1]);
+			ResetPreviousDraw(state);
+			state->previous_draw_type = (UINT)DrawCall::Draw;
+			if (stream_output_bound)
+				state->accumulated.vertex_count += (UINT)eargs[0];
 			break;
 		case DrawCommandType::DRAW_AUTO:
 			COMMAND_LIST_LOG(state, "[%S] DrawAuto()\n", ini_section.c_str());
 			mOrigContext1->DrawAuto();
+			ResetPreviousDraw(state);
+			state->previous_draw_type = (UINT)DrawCall::DrawAuto;
 			break;
 		case DrawCommandType::DRAW_INDEXED:
 			eval_args(3, eargs, state);
 			COMMAND_LIST_LOG(state, "[%S] DrawIndexed(%u, %u, %i)\n", ini_section.c_str(), eargs[0], eargs[1], (INT)eargs[2]);
 			mOrigContext1->DrawIndexed(eargs[0], eargs[1], (INT)eargs[2]);
+			ResetPreviousDraw(state);
+			state->previous_draw_type = (UINT)DrawCall::DrawIndexed;
+			if (stream_output_bound) {
+				state->accumulated.index_count += (UINT)eargs[0];
+				state->accumulated.instance_count += (UINT)eargs[1];
+			}
 			break;
 		case DrawCommandType::DRAW_INDEXED_INSTANCED:
 			eval_args(5, eargs, state);
 			COMMAND_LIST_LOG(state, "[%S] DrawIndexedInstanced(%u, %u, %u, %i, %u)\n", ini_section.c_str(), eargs[0], eargs[1], eargs[2], (INT)eargs[3], eargs[4]);
 			mOrigContext1->DrawIndexedInstanced(eargs[0], eargs[1], eargs[2], (INT)eargs[3], eargs[4]);
+			ResetPreviousDraw(state);
+			state->previous_draw_type = (UINT)DrawCall::DrawIndexedInstanced;
+			if (stream_output_bound) {
+				state->accumulated.index_count += (UINT)eargs[0];
+				state->accumulated.instance_count += (UINT)eargs[1];
+			}
 			break;
 		case DrawCommandType::DRAW_INSTANCED:
 			eval_args(4, eargs, state);
 			COMMAND_LIST_LOG(state, "[%S] DrawInstanced(%u, %u, %u, %u)\n", ini_section.c_str(), eargs[0], eargs[1], eargs[2], eargs[3]);
 			mOrigContext1->DrawInstanced(eargs[0], eargs[1], eargs[2], eargs[3]);
+			ResetPreviousDraw(state);
+			state->previous_draw_type = (UINT)DrawCall::DrawInstanced;
+			if (stream_output_bound) {
+				state->accumulated.vertex_count += (UINT)eargs[0];
+				state->accumulated.instance_count += (UINT)eargs[1];
+			}
 			break;
 		case DrawCommandType::DISPATCH:
 			eval_args(3, eargs, state);
 			COMMAND_LIST_LOG(state, "[%S] Dispatch(%u, %u, %u)\n", ini_section.c_str(), eargs[0], eargs[1], eargs[2]);
 			mOrigContext1->Dispatch(eargs[0], eargs[1], eargs[2]);
+			ResetPreviousDraw(state);
+			state->previous_draw_type = (UINT)DrawCall::Dispatch;
 			break;
 		case DrawCommandType::DRAW_INDEXED_INSTANCED_INDIRECT:
-			do_indirect_draw_call(state, "DrawIndexedInstancedIndirect", &ID3D11DeviceContext::DrawIndexedInstancedIndirect);
+			do_indirect_draw_call(state, "DrawIndexedInstancedIndirect", (UINT)DrawCall::DrawIndexedInstancedIndirect, &ID3D11DeviceContext::DrawIndexedInstancedIndirect);
 			break;
 		case DrawCommandType::DRAW_INSTANCED_INDIRECT:
-			do_indirect_draw_call(state, "DrawInstancedIndirect", &ID3D11DeviceContext::DrawInstancedIndirect);
+			do_indirect_draw_call(state, "DrawInstancedIndirect", (UINT)DrawCall::DrawInstancedIndirect, &ID3D11DeviceContext::DrawInstancedIndirect);
 			break;
 		case DrawCommandType::DISPATCH_INDIRECT:
-			do_indirect_draw_call(state, "DispatchIndirect", &ID3D11DeviceContext::DispatchIndirect);
+			do_indirect_draw_call(state, "DispatchIndirect", (UINT)DrawCall::DispatchIndirect, &ID3D11DeviceContext::DispatchIndirect);
 			break;
 		case DrawCommandType::FROM_CALLER:
 			if (!info) {
@@ -1660,20 +1715,39 @@ void DrawCommand::run(CommandListState *state)
 					LogOverlay(LOG_DIRE, "BUG: draw = from_caller -> unknown draw call type\n");
 					break;
 			}
+
+			// Replayed the original draw call, so record all of its parameters:
+			ResetPreviousDraw(state);
+			state->previous_draw_type = (UINT)info->type;
+			if (stream_output_bound) {
+				state->accumulated.vertex_count += info->VertexCount;
+				state->accumulated.index_count += info->IndexCount;
+				state->accumulated.instance_count += info->InstanceCount;
+			}
 			break;
 		case DrawCommandType::AUTO_VERTEX_COUNT:
 			auto_count = get_vertex_count_from_current_vb(mOrigContext1);
 			COMMAND_LIST_LOG(state, "[%S] draw = auto -> Draw(%u, 0)\n", ini_section.c_str(), auto_count);
-			if (auto_count)
+			if (auto_count) {
 				mOrigContext1->Draw(auto_count, 0);
+				ResetPreviousDraw(state);
+				state->previous_draw_type = (UINT)DrawCall::Draw;
+				if (stream_output_bound)
+					state->accumulated.vertex_count += auto_count;
+			}
 			else
 				COMMAND_LIST_LOG(state, "  Unable to determine vertex count\n");
 			break;
 		case DrawCommandType::AUTO_INDEX_COUNT:
 			auto_count = get_index_count_from_current_ib(mOrigContext1);
 			COMMAND_LIST_LOG(state, "[%S] drawindexed = auto -> DrawIndexed(%u, 0, 0)\n", ini_section.c_str(), auto_count);
-			if (auto_count)
+			if (auto_count) {
 				mOrigContext1->DrawIndexed(auto_count, 0, 0);
+				ResetPreviousDraw(state);
+				state->previous_draw_type = (UINT)DrawCall::DrawIndexed;
+				if (stream_output_bound)
+					state->accumulated.index_count += auto_count;
+			}
 			else
 				COMMAND_LIST_LOG(state, "  Unable to determine index count\n");
 			break;
@@ -1684,8 +1758,15 @@ void DrawCommand::run(CommandListState *state)
 			}
 			auto_count = get_index_count_from_current_ib(mOrigContext1);
 			COMMAND_LIST_LOG(state, "[%S] drawindexedinstanced = auto -> DrawIndexedInstanced(%u, %u, 0, 0, %u)\n", ini_section.c_str(), auto_count, info->InstanceCount, info->FirstInstance);
-			if (auto_count)
+			if (auto_count) {
 				mOrigContext1->DrawIndexedInstanced(auto_count, info->InstanceCount, 0, 0, info->FirstInstance);
+				ResetPreviousDraw(state);
+				state->previous_draw_type = (UINT)DrawCall::DrawIndexedInstanced;
+				if (stream_output_bound) {
+					state->accumulated.index_count += auto_count;
+					state->accumulated.instance_count += info->InstanceCount;
+				}
+			}
 			else
 				COMMAND_LIST_LOG(state, "  Unable to determine index count\n");
 			break;
@@ -3222,7 +3303,8 @@ CommandListState::CommandListState() :
 	recursion(0),
 	extra_indent(0),
 	aborted(false),
-	scissor_valid(false)
+	scissor_valid(false),
+	previous_draw_type(0)
 {
 	memset(&cursor_info, 0, sizeof(CURSORINFO));
 	memset(&cursor_info_ex, 0, sizeof(ICONINFO));
@@ -3699,6 +3781,18 @@ float CommandListOperand::evaluate(CommandListState *state, HackerDevice *device
 		case ParamOverrideType::DRAW_TYPE:
 			if (state->call_info)
 				return (float)state->call_info->type;
+			return 0;
+		case ParamOverrideType::ACCUMULATED_VERTEX_COUNT:
+			return (float)state->accumulated.vertex_count;
+		case ParamOverrideType::ACCUMULATED_INDEX_COUNT:
+			return (float)state->accumulated.index_count;
+		case ParamOverrideType::ACCUMULATED_INSTANCE_COUNT:
+			return (float)state->accumulated.instance_count;
+		case ParamOverrideType::PREVIOUS_DRAW_TYPE:
+			return (float)state->previous_draw_type;
+		case ParamOverrideType::SKIPPED:
+			if (state->call_info)
+				return state->call_info->skip ? 1.0f : 0.0f;
 			return 0;
 		case ParamOverrideType::CURSOR_VISIBLE:
 			UpdateCursorInfo(state);

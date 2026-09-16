@@ -1779,6 +1779,13 @@ STDMETHODIMP_(void) HackerContext::SOSetTargets(THIS_
 	__in_ecount_opt(NumBuffers)  const UINT *pOffsets)
 {
 	 mOrigContext1->SOSetTargets(NumBuffers, ppSOTargets, pOffsets);
+
+	// Track the application's stream output bindings for the accumulated draw
+	// counts. Any call (bind or unbind) bumps the generation so the counts
+	// reset against the new bindings; the mod's own stream output copies go
+	// through the raw original context, so they don't reach this hook.
+	m_so_targets_bound = NumBuffers > 0;
+	m_so_binding_generation++;
 }
 
 bool HackerContext::BeforeDispatch(DispatchContext *context)

@@ -45,6 +45,31 @@ struct InputLayoutElementOverride {
 	} replace;
 };
 
+// Draw accounting shared across a single command list run, see
+// CommandListState. A given draw only adds to the counter matching its own
+// draw type; indirect draws resolve their counts on the GPU, so they
+// contribute nothing here. The totals are read back through the
+// accumulated_* INI parameters.
+//
+// The totals only accumulate while the application has a stream output bound
+// (see HackerContext::IsStreamOutputBound), since that is the use case they
+// exist for. so_generation is the stream output binding generation (see
+// HackerContext::GetStreamOutputBindingGeneration) the totals belong to: when
+// the app (re)binds or unbinds stream output mid-run the generation changes
+// and Reset() zeroes the totals so they restart against the new bindings.
+struct DrawRunAccounting {
+	UINT vertex_count = 0;
+	UINT index_count = 0;
+	UINT instance_count = 0;
+
+	unsigned so_generation = 0;
+
+	void Reset()
+	{
+		vertex_count = index_count = instance_count = 0;
+	}
+};
+
 class CommandListState {
 public:
 	HackerDevice *mHackerDevice;
@@ -83,6 +108,19 @@ public:
 	ID3D11ShaderResourceView *cursor_mask_view;
 	ID3D11ShaderResourceView *cursor_color_view;
 	RECT window_rect;
+
+	// Run-scoped draw accounting for this command list run, shared with any
+	// nested command lists and zeroed when the run starts. The count totals
+	// accumulate across every draw actually executed, so an override can
+	// recover an individual draw by diffing against a value captured at the
+	// start of its block. Read back through the accumulated_* INI parameters.
+	DrawRunAccounting accumulated;
+
+	// Metadata for the most recent draw to actually execute in this run.
+	// Re-zeroed before each draw (see ResetPreviousDraw) so nothing stale
+	// survives from an earlier draw, and read back through the
+	// previous_draw_type INI parameter.
+	UINT previous_draw_type;   // DrawCall enum value, 0 = nothing drawn yet
 
 	int recursion;
 	int extra_indent;
@@ -1396,6 +1434,13 @@ enum class ParamOverrideType {
 	THREAD_GROUP_COUNT_Z,
 	INDIRECT_OFFSET,
 	DRAW_TYPE,
+	// Draw accounting for the current command list run - see
+	// CommandListState for the accumulated vs per-draw lifecycle.
+	ACCUMULATED_VERTEX_COUNT,
+	ACCUMULATED_INDEX_COUNT,
+	ACCUMULATED_INSTANCE_COUNT,
+	PREVIOUS_DRAW_TYPE,
+	SKIPPED,
 	CURSOR_VISIBLE,
 	CURSOR_SCREEN_X, // Cursor in screen coordinates in pixels
 	CURSOR_SCREEN_Y,
@@ -1440,6 +1485,11 @@ static EnumName_t<const wchar_t *, ParamOverrideType> ParamOverrideTypeNames[] =
 	{L"thread_group_count_z", ParamOverrideType::THREAD_GROUP_COUNT_Z},
 	{L"indirect_offset", ParamOverrideType::INDIRECT_OFFSET},
 	{L"draw_type", ParamOverrideType::DRAW_TYPE},
+	{L"accumulated_vertex_count", ParamOverrideType::ACCUMULATED_VERTEX_COUNT},
+	{L"accumulated_index_count", ParamOverrideType::ACCUMULATED_INDEX_COUNT},
+	{L"accumulated_instance_count", ParamOverrideType::ACCUMULATED_INSTANCE_COUNT},
+	{L"previous_draw_type", ParamOverrideType::PREVIOUS_DRAW_TYPE},
+	{L"skipped", ParamOverrideType::SKIPPED},
 	{L"cursor_showing", ParamOverrideType::CURSOR_VISIBLE},
 	{L"cursor_screen_x", ParamOverrideType::CURSOR_SCREEN_X},
 	{L"cursor_screen_y", ParamOverrideType::CURSOR_SCREEN_Y},
@@ -1656,7 +1706,7 @@ public:
 		type(DrawCommandType::INVALID)
 	{}
 
-	void do_indirect_draw_call(CommandListState *state, char *name,
+	void do_indirect_draw_call(CommandListState *state, char *name, UINT draw_call_type,
 		void (__stdcall ID3D11DeviceContext::*IndirectDrawCall)(THIS_
 		ID3D11Buffer *pBufferForArgs,
 		UINT AlignedByteOffsetForArgs));
