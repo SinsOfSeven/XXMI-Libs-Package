@@ -146,6 +146,14 @@ private:
 	unsigned draw_number;
 	unsigned dispatch_number;
 
+	// Tracks the application's stream output bindings: whether any stream
+	// output buffer is currently bound, plus a generation counter bumped on
+	// every SOSetTargets call (bind or unbind). The accumulated draw counts
+	// use these to only accumulate while a stream output is bound, and to
+	// reset when the bindings change mid-run.
+	bool m_so_targets_bound = false;
+	unsigned m_so_binding_generation = 0;
+
 	FlatHashMap<UINT, ID3D11Buffer*> mReadbackBuffers = FlatHashMap<UINT, ID3D11Buffer*>(64);
 
 	// These private methods are utility routines for HackerContext.
@@ -250,6 +258,9 @@ public:
 	unsigned GetDrawNumber() const { return draw_number; };
 	unsigned GetDispatchNumber() const { return dispatch_number; };
 	void ResetCallCounters() { draw_number = 0; dispatch_number = 0; };
+
+	bool IsStreamOutputBound() const { return m_so_targets_bound; }
+	unsigned GetStreamOutputBindingGeneration() const { return m_so_binding_generation; }
 
 	ID3D11Buffer* GetReadbackBuffer(UINT size);
 
