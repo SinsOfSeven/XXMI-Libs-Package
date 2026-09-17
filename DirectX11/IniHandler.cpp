@@ -5041,7 +5041,7 @@ void LoadConfigFile()
 	ParseResourceSections();
 
 	// Filters may match resource descriptions and are referred to by the
-	// `->Filter(<expression>)` expression member, so parse them before any command
+	// `->Match(<expression>)` expression member, so parse them before any command
 	// lists:
 	ParseFilterSections();
 

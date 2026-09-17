@@ -5980,7 +5980,7 @@ bool CommandListOperand::parse_slot(const wstring* operand, const wstring* ini_n
 bool CommandListOperand::parse_target(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope)
 {
 	int ret;
-	// Expression operands are the only place a `->Filter(<expression>)` member is valid:
+	// Expression operands are the only place a `->Match(<expression>)` member is valid:
 	ret = texture_filter_target.ParseTarget(operand->c_str(), true, ini_namespace, scope, true, false, true);
 	if (ret) {
 		type = ParamOverrideType::TEXTURE;
@@ -7897,7 +7897,7 @@ IniParserResult SyntaxTarget::extract_arguments(const wchar_t* target, size_t& l
 		return IniParserResult::TOKEN_NOT_FOUND;
 
 	// TODO: This scans for the last '(' only, so a member argument cannot
-	// contain grouping parentheses (e.g. `->Filter((A | B) & C)`). Supporting
+	// contain grouping parentheses (e.g. `->Match((A | B) & C)`). Supporting
 	// them needs a balanced scan for the outermost '(' instead.
 	const wchar_t* open = wcsrchr(target, L'(');
 
@@ -8147,7 +8147,7 @@ IniParserResult ResourceCopyTarget::ParseTargetPrefix(const wchar_t*& target, si
 
 namespace {
 
-// Parses a filter expression as accepted by the `->Filter(<expression>)`
+// Parses a filter expression as accepted by the `->Match(<expression>)`
 // member, e.g. `Filter2k | !Filter4k`. Grammar, highest precedence first:
 //
 //   unary := '!' unary | name
@@ -8341,14 +8341,14 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 	static constexpr MemberInfo members[] = {
 		{ L"->mips",           6, ResourceCopyTargetEvaluationMode::RESOURCE_MIPS },
 		{ L"->size",           6, ResourceCopyTargetEvaluationMode::RESOURCE_SIZE },
+		{ L"->match",          7, ResourceCopyTargetEvaluationMode::RESOURCE_FILTER, {{
+			MemberArg::Type::String   // Filter Expression or Hash
+		}} },
 		{ L"->array",          7, ResourceCopyTargetEvaluationMode::RESOURCE_ARRAY },
 		{ L"->index",          7, ResourceCopyTargetEvaluationMode::POOL_INDEX },
 		{ L"->width",          7, ResourceCopyTargetEvaluationMode::RESOURCE_WIDTH },
 		{ L"->offset",         8, ResourceCopyTargetEvaluationMode::RESOURCE_OFFSET },
 		{ L"->stride",         8, ResourceCopyTargetEvaluationMode::RESOURCE_STRIDE },
-		{ L"->filter",         8, ResourceCopyTargetEvaluationMode::RESOURCE_FILTER, {{
-			MemberArg::Type::String   // Filter Expression
-		}} },
 		{ L"->format",         8, ResourceCopyTargetEvaluationMode::RESOURCE_FORMAT },
 		{ L"->height",         8, ResourceCopyTargetEvaluationMode::RESOURCE_HEIGHT },
 		{ L"->region",         8, ResourceCopyTargetEvaluationMode::RESOURCE_REGION, {{
@@ -8832,7 +8832,7 @@ bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, cons
 		if (ret == IniParserResult::SYNTAX_ERROR)
 			return false;
 
-		// `->Filter(<expression>)` is a value-only selector that is only meaningful
+		// `->Match(<expression>)` is a value-only selector that is only meaningful
 		// as an expression operand, so it is rejected everywhere else:
 		if (evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_FILTER && !allow_filter)
 			return false;

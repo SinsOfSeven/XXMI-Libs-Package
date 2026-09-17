@@ -2,7 +2,7 @@
 
 A `[Filter<Name>]` section declaratively describes **which resources a piece of logic is interested in**. Unlike a fuzzy `[TextureOverride]`, a filter is pure — it does not map to a shader override, it simply evaluates to `1.0` (match) or `0.0` (no match) when a command list runs against a resource.
 
-A filter is evaluated with the `->Filter(<expression>)` resource member, which can be used anywhere an expression is accepted. It accepts a single filter name or a boolean expression combining several filters, so filters can be tested directly, combined, or composed into a score.
+A filter is evaluated with the `->Match(<expression>)` resource member, which can be used anywhere an expression is accepted. It accepts a single filter name or a boolean expression combining several filters, so filters can be tested directly, combined, or composed into a score.
 
 ## Declaring a filter
 
@@ -93,7 +93,7 @@ Unlike fuzzy texture overrides:
 
 ## Composing filters
 
-`->Filter(...)` accepts a boolean expression over filter names, so several filters can be combined without reading the resource more than once:
+`->Match(...)` accepts a boolean expression over filter names, so several filters can be combined without reading the resource more than once:
 
 | Operator | Meaning | Precedence |
 | --- | --- | --- |
@@ -105,32 +105,32 @@ Unlike fuzzy texture overrides:
 Each operator is a single, unique glyph — there are no aliases (`&&`, `||`, `~` and word forms such as `and` are not accepted).
 
 ```ini
-$is_large = ps-t0->Filter(Filter2k | Filter4k)   ; 2K or 4K
-$is_exact = ps-t0->Filter(Filter2k & !Filter4k)  ; 2K and not 4K
-$one_of   = ps-t0->Filter(FilterA ^ FilterB)     ; exactly one of A, B
+$is_large = ps-t0->Match(Filter2k | Filter4k)   ; 2K or 4K
+$is_exact = ps-t0->Match(Filter2k & !Filter4k)  ; 2K and not 4K
+$one_of   = ps-t0->Match(FilterA ^ FilterB)     ; exactly one of A, B
 ```
 
-`&` and `|` short-circuit, and the whole expression reads the resource description once regardless of how many filters it contains — `ps-t0->Filter(A | B)` costs the same as a single `->Filter(A)`.
+`&` and `|` short-circuit, and the whole expression reads the resource description once regardless of how many filters it contains — `ps-t0->Match(A | B)` costs the same as a single `->Match(A)`.
 
 > **Note:** The `&` that joins bounds *inside a `match_*` value* (`match_height = >100 & <500`) belongs to the fuzzy-match grammar and is unrelated to the boolean `&` operator described here.
 
-Grouping parentheses are **not** supported yet, so expressions are precedence-only: `->Filter((A | B) & C)` is a syntax error. Reorder or split the expression instead.
+Grouping parentheses are **not** supported yet, so expressions are precedence-only: `->Match((A | B) & C)` is a syntax error. Reorder or split the expression instead.
 
 ## Usage
 
-`Resource->Filter(<expression>)` is an expression operand, where `Resource` is any resource target (`ps-t0`, `ResourceFoo`, `PoolFoo[0]`, …) and `<expression>` is a filter name or a boolean expression over filter names (see [Composing filters](#composing-filters)). It evaluates to `1.0` on a match, `0.0` when the resource is bound but does not match, and `-0.0` when the resource cannot be resolved (for example an unbound pipeline slot).
+`Resource->Match(<expression>)` is an expression operand, where `Resource` is any resource target (`ps-t0`, `ResourceFoo`, `PoolFoo[0]`, …) and `<expression>` is a filter name or a boolean expression over filter names (see [Composing filters](#composing-filters)). It evaluates to `1.0` on a match, `0.0` when the resource is bound but does not match, and `-0.0` when the resource cannot be resolved (for example an unbound pipeline slot).
 
 ```ini
 [CommandListSelect]
-$is_2k = ps-t0->Filter(Filter2k)
-$is_large = ps-t0->Filter(Filter2k | Filter4k)
+$is_2k = ps-t0->Match(Filter2k)
+$is_large = ps-t0->Match(Filter2k | Filter4k)
 
 ; Compose several filters into a score:
-$score = ps-t1->Filter(FilterRatio)
-$score = $score + ps-t2->Filter(FilterIndex)
-$score = $score * ib->Filter(FilterIndex)
+$score = ps-t1->Match(FilterRatio)
+$score = $score + ps-t2->Match(FilterIndex)
+$score = $score * ib->Match(FilterIndex)
 
-if ResourceFoo->Filter(Filter2k)
+if ResourceFoo->Match(Filter2k)
     ; Do something
 endif
 ```
@@ -139,7 +139,7 @@ Because the result is a normal expression value, filters compose with the rest o
 
 Filters are cheap compared to `store`: they read a resource description (and optionally the current draw call info) without any GPU readback.
 
-See the [Resource Metadata](resource-metadata.md#filter) documentation for the `->Filter(<expression>)` member details.
+See the [Resource Metadata](resource-metadata.md#match) documentation for the `->Match(<expression>)` member details.
 
 ## Refactor note
 

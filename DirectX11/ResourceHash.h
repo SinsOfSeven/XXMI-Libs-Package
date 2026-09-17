@@ -896,7 +896,7 @@ class CustomResource;
 
 // A single [Filter<Name>] section: a set of constraints on resource
 // descriptions (and optionally the draw context) that can be evaluated against
-// any resource from a command list via the `->Filter(<expression>)` member
+// any resource from a command list via the `->Match(<expression>)` member
 // (see FilterExpr for how several filters are combined). Unlike a fuzzy
 // [TextureOverride], a filter is pure - it never maps
 // to a TextureOverride, so evaluating one is cheap, and it can also match the
@@ -950,7 +950,7 @@ private:
 };
 
 // Composes [Filter<Name>] sections with the boolean operators accepted inside
-// the `->Filter(<expression>)` member:
+// the `->Match(<expression>)` member:
 //
 //   !   NOT   (prefix, highest precedence)
 //   &   AND
