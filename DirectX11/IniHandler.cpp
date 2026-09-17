@@ -3159,6 +3159,14 @@ static void parse_fuzzy_numeric_match_expression(const wchar_t *setting, FuzzyMa
 		return parse_fuzzy_numeric_match_expression_error(ptr);
 }
 
+// Defined further down, but shared by both the fuzzy [TextureOverride] and
+// [Filter<Name>] parsers, so forward declare them here:
+static void parse_filter_numeric_field(const wchar_t *section, const wchar_t *key, FilterField *field);
+template <class T>
+static void parse_filter_flags_field(const wchar_t *section, const wchar_t *key, FilterField *field,
+		struct EnumName_t<const wchar_t *, T> *enum_names);
+static void parse_filter_format_field(const wchar_t *section, const wchar_t *key, FilterField *field);
+
 static void parse_texture_override_common(const wchar_t *id, TextureOverride *override, bool register_command_lists)
 {
 	wchar_t setting[MAX_PATH];
@@ -3234,31 +3242,13 @@ static void parse_texture_override_common(const wchar_t *id, TextureOverride *ov
 	override->expand_region_copy = GetIniBool(id, L"expand_region_copy", false, NULL);
 	override->deny_cpu_read = GetIniBool(id, L"deny_cpu_read", false, NULL);
 
-	// Draw call context matching:
-	if (GetIniStringAndLog(id, L"match_first_vertex", 0, setting, MAX_PATH)) {
-		parse_fuzzy_numeric_match_expression(setting, &override->match_first_vertex);
-		override->has_draw_context_match = true;
-	}
-	if (GetIniStringAndLog(id, L"match_first_index", 0, setting, MAX_PATH)) {
-		parse_fuzzy_numeric_match_expression(setting, &override->match_first_index);
-		override->has_draw_context_match = true;
-	}
-	if (GetIniStringAndLog(id, L"match_first_instance", 0, setting, MAX_PATH)) {
-		parse_fuzzy_numeric_match_expression(setting, &override->match_first_instance);
-		override->has_draw_context_match = true;
-	}
-	if (GetIniStringAndLog(id, L"match_vertex_count", 0, setting, MAX_PATH)) {
-		parse_fuzzy_numeric_match_expression(setting, &override->match_vertex_count);
-		override->has_draw_context_match = true;
-	}
-	if (GetIniStringAndLog(id, L"match_index_count", 0, setting, MAX_PATH)) {
-		parse_fuzzy_numeric_match_expression(setting, &override->match_index_count);
-		override->has_draw_context_match = true;
-	}
-	if (GetIniStringAndLog(id, L"match_instance_count", 0, setting, MAX_PATH)) {
-		parse_fuzzy_numeric_match_expression(setting, &override->match_instance_count);
-		override->has_draw_context_match = true;
-	}
+	// Draw call context matching (shared with [Filter<Name>] sections):
+	parse_filter_numeric_field(id, L"match_first_vertex", &override->filter.FirstVertex);
+	parse_filter_numeric_field(id, L"match_first_index", &override->filter.FirstIndex);
+	parse_filter_numeric_field(id, L"match_first_instance", &override->filter.FirstInstance);
+	parse_filter_numeric_field(id, L"match_vertex_count", &override->filter.VertexCount);
+	parse_filter_numeric_field(id, L"match_index_count", &override->filter.IndexCount);
+	parse_filter_numeric_field(id, L"match_instance_count", &override->filter.InstanceCount);
 
 	ParseCommandList(id, &override->command_list, &override->post_command_list, TextureOverrideIniKeys, register_command_lists);
 }
@@ -3350,17 +3340,17 @@ static bool parse_masked_flags_field(const wstring setting, unsigned *val, unsig
 static void parse_texture_override_fuzzy_match(const wchar_t *section)
 {
 	FuzzyMatchResourceDesc *fuzzy;
-	wchar_t setting[MAX_PATH];
 	bool found;
 	int ival;
 
 	fuzzy = new FuzzyMatchResourceDesc(section);
+	FilterMatch *filter = &fuzzy->texture_override->filter;
 
 	ival = GetIniEnum(section, L"match_type",
 			D3D11_RESOURCE_DIMENSION_UNKNOWN, &found,
 			L"D3D11_RESOURCE_DIMENSION_", ResourceDimensions,
 			ARRAYSIZE(ResourceDimensions), 1);
-	fuzzy->set_resource_type((D3D11_RESOURCE_DIMENSION)ival);
+	filter->set_resource_type((D3D11_RESOURCE_DIMENSION)ival);
 
 	// We always use match_usage=default if it is not explicitly specified,
 	// since forcing the stereo mode doesn't make much sense for other
@@ -3374,56 +3364,33 @@ static void parse_texture_override_fuzzy_match(const wchar_t *section)
 	ival = GetIniEnum(section, L"match_usage",
 			D3D11_USAGE_DEFAULT, &found, L"D3D11_USAGE_",
 			ResourceUsage, ARRAYSIZE(ResourceUsage), 0);
-	fuzzy->Usage.op = FuzzyMatchOp::EQUAL;
-	fuzzy->Usage.val = ival;
-
-	// Flags
-	if (GetIniStringAndLog(section, L"match_bind_flags", 0, setting, MAX_PATH)) {
-		if (parse_masked_flags_field(setting, &fuzzy->BindFlags.val, &fuzzy->BindFlags.mask, CustomResourceBindFlagNames)) {
-			fuzzy->BindFlags.op = FuzzyMatchOp::EQUAL;
-		}
-	}
-	if (GetIniStringAndLog(section, L"match_cpu_access_flags", 0, setting, MAX_PATH)) {
-		if (parse_masked_flags_field(setting, &fuzzy->CPUAccessFlags.val, &fuzzy->CPUAccessFlags.mask, ResourceCPUAccessFlagNames)) {
-			fuzzy->CPUAccessFlags.op = FuzzyMatchOp::EQUAL;
-		}
-	}
-	if (GetIniStringAndLog(section, L"match_misc_flags", 0, setting, MAX_PATH)) {
-		if (parse_masked_flags_field(setting, &fuzzy->MiscFlags.val, &fuzzy->MiscFlags.mask, ResourceMiscFlagNames)) {
-			fuzzy->MiscFlags.op = FuzzyMatchOp::EQUAL;
-		}
+	{
+		FuzzyMatch matcher;
+		matcher.op = FuzzyMatchOp::EQUAL;
+		matcher.val = ival;
+		filter->Usage.add(matcher);
 	}
 
-	// Format string
-	if (GetIniStringAndLog(section, L"match_format", 0, setting, MAX_PATH)) {
-		fuzzy->Format.val = ParseFormatString(setting, true);
-		if (fuzzy->Format.val == (DXGI_FORMAT)-1)
-			IniWarningW(L"Unknown format \"%ls\"\n", setting);
-		else
-			fuzzy->Format.op = FuzzyMatchOp::EQUAL;
-	}
+	// Flags:
+	parse_filter_flags_field(section, L"match_bind_flags", &filter->BindFlags, CustomResourceBindFlagNames);
+	parse_filter_flags_field(section, L"match_cpu_access_flags", &filter->CPUAccessFlags, ResourceCPUAccessFlagNames);
+	parse_filter_flags_field(section, L"match_misc_flags", &filter->MiscFlags, ResourceMiscFlagNames);
 
-	// Simple numeric expressions:
-	if (GetIniStringAndLog(section, L"match_byte_width", 0, setting, MAX_PATH))
-		parse_fuzzy_numeric_match_expression(setting, &fuzzy->ByteWidth);
-	if (GetIniStringAndLog(section, L"match_stride", 0, setting, MAX_PATH))
-		parse_fuzzy_numeric_match_expression(setting, &fuzzy->StructureByteStride);
-	if (GetIniStringAndLog(section, L"match_mips", 0, setting, MAX_PATH))
-		parse_fuzzy_numeric_match_expression(setting, &fuzzy->MipLevels);
-	if (GetIniStringAndLog(section, L"match_width", 0, setting, MAX_PATH))
-		parse_fuzzy_numeric_match_expression(setting, &fuzzy->Width);
-	if (GetIniStringAndLog(section, L"match_height", 0, setting, MAX_PATH))
-		parse_fuzzy_numeric_match_expression(setting, &fuzzy->Height);
-	if (GetIniStringAndLog(section, L"match_depth", 0, setting, MAX_PATH))
-		parse_fuzzy_numeric_match_expression(setting, &fuzzy->Depth);
-	if (GetIniStringAndLog(section, L"match_array", 0, setting, MAX_PATH))
-		parse_fuzzy_numeric_match_expression(setting, &fuzzy->ArraySize);
-	if (GetIniStringAndLog(section, L"match_msaa", 0, setting, MAX_PATH))
-		parse_fuzzy_numeric_match_expression(setting, &fuzzy->SampleDesc_Count);
-	if (GetIniStringAndLog(section, L"match_msaa_quality", 0, setting, MAX_PATH))
-		parse_fuzzy_numeric_match_expression(setting, &fuzzy->SampleDesc_Quality);
+	// Format:
+	parse_filter_format_field(section, L"match_format", &filter->Format);
 
-	if (!fuzzy->update_types_matched()) {
+	// Resource description numerics:
+	parse_filter_numeric_field(section, L"match_byte_width", &filter->ByteWidth);
+	parse_filter_numeric_field(section, L"match_stride", &filter->StructureByteStride);
+	parse_filter_numeric_field(section, L"match_mips", &filter->MipLevels);
+	parse_filter_numeric_field(section, L"match_width", &filter->Width);
+	parse_filter_numeric_field(section, L"match_height", &filter->Height);
+	parse_filter_numeric_field(section, L"match_depth", &filter->Depth);
+	parse_filter_numeric_field(section, L"match_array", &filter->ArraySize);
+	parse_filter_numeric_field(section, L"match_msaa", &filter->SampleDesc_Count);
+	parse_filter_numeric_field(section, L"match_msaa_quality", &filter->SampleDesc_Quality);
+
+	if (!filter->update_types_matched()) {
 		IniWarningW(L"Section can never match any resources\n - [%ls]\n", section);
 		delete fuzzy;
 		return;
@@ -3602,7 +3569,7 @@ static void warn_if_duplicate_texture_hash(TextureOverride *override, uint32_t h
 	TextureOverrideMap::iterator i;
 	TextureOverrideList::iterator j;
 
-	if (override->has_draw_context_match || override->has_match_priority)
+	if (override->filter.has_draw_conditions() || override->has_match_priority)
 		return;
 
 	i = lookup_textureoverride(hash);
@@ -3617,7 +3584,7 @@ static void warn_if_duplicate_texture_hash(TextureOverride *override, uint32_t h
 		// 1. Fuzzy resource description matching (no hash - will have bailed above)
 		// 2. Draw context matching
 		// 3. Whenever a match_priority has been specified
-		if (j->has_draw_context_match || j->has_match_priority)
+		if (j->filter.has_draw_conditions() || j->has_match_priority)
 			continue;
 
 		IniWarningW(L"Possible Mod Conflict: Duplicate TextureOverride hash=%08lx\n"
@@ -4602,12 +4569,14 @@ void BuildTextureOverrideDrawMaps()
 
 		for (TextureOverride& ov : list)
 		{
-			if (ov.match_index_count.op == FuzzyMatchOp::EQUAL && ov.match_index_count.rhs_type1 == FuzzyMatchOperandType::VALUE) {
-				G->mTextureOverrideDrawIndexMap[ov.match_index_count.val].emplace_back(TextureOverrideFuzzyMatch{ hash, const_cast<TextureOverride*>(&ov) });
+			UINT index_count;
+			if (ov.filter.IndexCount.single_equal_value(&index_count)) {
+				G->mTextureOverrideDrawIndexMap[index_count].emplace_back(TextureOverrideFuzzyMatch{ hash, const_cast<TextureOverride*>(&ov) });
 				continue;
 			}
-			if (ov.match_vertex_count.op == FuzzyMatchOp::EQUAL && ov.match_vertex_count.rhs_type1 == FuzzyMatchOperandType::VALUE) {
-				G->mTextureOverrideDrawVertexMap[ov.match_vertex_count.val].emplace_back(TextureOverrideFuzzyMatch{ hash, const_cast<TextureOverride*>(&ov) });
+			UINT vertex_count;
+			if (ov.filter.VertexCount.single_equal_value(&vertex_count)) {
+				G->mTextureOverrideDrawVertexMap[vertex_count].emplace_back(TextureOverrideFuzzyMatch{ hash, const_cast<TextureOverride*>(&ov) });
 				continue;
 			}
 		}

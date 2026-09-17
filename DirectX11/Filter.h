@@ -60,15 +60,33 @@ public:
 	bool matches_uint(UINT lhs) const;
 };
 
-// A single filterable field on a resource. Unlike the scalar FuzzyMatch used
-// by FuzzyMatchResourceDesc, a FilterField collects every constraint written
-// for it in a [Filter] section (joined with '&'), and every constraint must
-// pass for the field to match. This allows lower & upper bounds on the same
-// field (e.g. match_height = >100 & <500).
+// A single filterable field on a resource. A FilterField collects every
+// constraint written for it (joined with '&'), and every constraint must pass
+// for the field to match. This allows lower & upper bounds on the same field
+// (e.g. match_height = >100 & <500) in both [Filter<Name>] and fuzzy
+// [TextureOverride] sections.
 class FilterField {
 public:
 	bool empty() const { return values.empty(); }
 	void add(const FuzzyMatch &m) { values.push_back(m); }
+	const std::vector<FuzzyMatch> &constraints() const { return values; }
+
+	// True if the field has exactly one plain `= value` constraint, and stores
+	// that value. This is the only form the draw info fast-path maps can index
+	// on (see BuildTextureOverrideDrawMaps), so anything else must fall back to
+	// scanning the overrides.
+	bool single_equal_value(UINT *out) const
+	{
+		if (values.size() != 1)
+			return false;
+
+		const FuzzyMatch &m = values.front();
+		if (m.op != FuzzyMatchOp::EQUAL || m.rhs_type1 != FuzzyMatchOperandType::VALUE)
+			return false;
+
+		*out = m.val;
+		return true;
+	}
 
 	// Matches the field value against a typed resource description. NOTE: Only
 	// safe to instantiate in translation units where FuzzyMatch::matches is
@@ -157,7 +175,10 @@ public:
 	void set_resource_type(D3D11_RESOURCE_DIMENSION type);
 	bool update_types_matched();
 
-private:
+	// True if any draw context field is constrained.
+	bool has_draw_conditions() const;
+	// Evaluates the draw context fields against the current draw call. Returns
+	// true when there are no draw conditions at all.
 	bool matches_draw_conditions(const DrawCallInfo *call_info) const;
 };
 

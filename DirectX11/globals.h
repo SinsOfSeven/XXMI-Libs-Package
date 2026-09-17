@@ -296,15 +296,12 @@ struct TextureOverride {
 	float filter_index;
 	float backup_filter_index;
 
-	bool has_draw_context_match;
 	bool has_match_priority;
 	int priority;
-	FuzzyMatch match_first_vertex;
-	FuzzyMatch match_first_index;
-	FuzzyMatch match_first_instance;
-	FuzzyMatch match_vertex_count;
-	FuzzyMatch match_index_count;
-	FuzzyMatch match_instance_count;
+
+	// The match_* conditions, both resource description and draw context
+	// fields. This is the same matcher [Filter<Name>] sections use.
+	FilterMatch filter;
 
 	CommandList command_list;
 	CommandList post_command_list;
@@ -320,7 +317,6 @@ struct TextureOverride {
 		expand_region_copy(false),
 		deny_cpu_read(false),
 		filter_index(FLT_MAX),
-		has_draw_context_match(false),
 		has_match_priority(false),
 		priority(0)
 	{}

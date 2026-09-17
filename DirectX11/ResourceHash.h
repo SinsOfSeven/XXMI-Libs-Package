@@ -773,46 +773,16 @@ static EnumName_t<const wchar_t *, ResourceMiscFlags> ResourceMiscFlagNames[] = 
 // FrameAnalysis.h to make that work, and that is an area that diverged from 1.2:
 struct TextureOverride;
 
+// A thin owner for a fuzzy [TextureOverride]. All match state lives in
+// TextureOverride::filter (a FilterMatch), so this type only exists to keep the
+// owning pointer used by G->mFuzzyTextureOverrides (and its sorted set) stable,
+// allowing the fuzzy and [Filter<Name>] matchers to share one implementation.
 class FuzzyMatchResourceDesc {
-private:
-	template <typename DescType>
-	bool check_common_resource_fields(const DescType *desc) const;
-	template <typename DescType>
-	bool check_common_texture_fields(const DescType *desc) const;
 public:
 	struct TextureOverride *texture_override;
 
-	bool matches_buffer;
-	bool matches_tex1d;
-	bool matches_tex2d;
-	bool matches_tex3d;
-
-	// TODO: Consider making this a vector we iterate over so we only
-	// process tests specified in this texture override
-	FuzzyMatch Usage;               // Common
-	FuzzyMatch BindFlags;           // Common
-	FuzzyMatch CPUAccessFlags;      // Common
-	FuzzyMatch MiscFlags;           // Common
-	FuzzyMatch ByteWidth;           // Buffer+StructuredBuffer
-	FuzzyMatch StructureByteStride; //        StructuredBuffer XXX: I think I may have seen this later set to 0 if it was initially set on a regular buffer?
-	FuzzyMatch MipLevels;           // 1D+2D+3D XXX: Need to check what happens for resources created with mips=0 and mips generated later
-	FuzzyMatch Format;              // 1D+2D+3D
-	FuzzyMatch Width;               // 1D+2D+3D
-	FuzzyMatch Height;              //    2D+3D
-	FuzzyMatch Depth;               //       3D
-	FuzzyMatch ArraySize;           // 1D+2D
-	FuzzyMatch SampleDesc_Count;    //    2D
-	FuzzyMatch SampleDesc_Quality;  //    2D    XXX Can anything change here if count=1?
-
 	FuzzyMatchResourceDesc(std::wstring section);
 	~FuzzyMatchResourceDesc();
-	bool matches(const D3D11_BUFFER_DESC *desc) const;
-	bool matches(const D3D11_TEXTURE1D_DESC *desc) const;
-	bool matches(const D3D11_TEXTURE2D_DESC *desc) const;
-	bool matches(const D3D11_TEXTURE3D_DESC *desc) const;
-
-	void set_resource_type(D3D11_RESOURCE_DIMENSION type);
-	bool update_types_matched();
 };
 
 // FilterMatch, FilterExpr and FilterMatches live in Filter.h.

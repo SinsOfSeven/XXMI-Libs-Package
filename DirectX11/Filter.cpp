@@ -131,10 +131,15 @@ FilterMatch::FilterMatch() :
 {
 }
 
+bool FilterMatch::has_draw_conditions() const
+{
+	return !FirstVertex.empty() || !FirstIndex.empty() || !FirstInstance.empty()
+	    || !VertexCount.empty() || !IndexCount.empty() || !InstanceCount.empty();
+}
+
 bool FilterMatch::matches_draw_conditions(const DrawCallInfo *call_info) const
 {
-	if (FirstVertex.empty() && FirstIndex.empty() && FirstInstance.empty()
-	 && VertexCount.empty() && IndexCount.empty() && InstanceCount.empty())
+	if (!has_draw_conditions())
 		return true;
 
 	if (!call_info)
@@ -383,9 +388,8 @@ void FilterMatch::set_resource_type(D3D11_RESOURCE_DIMENSION type)
 
 bool FilterMatch::update_types_matched()
 {
-	// Mirror of FuzzyMatchResourceDesc::update_types_matched(), but with
-	// FilterField - a field that has at least one constraint is non-empty, so a
-	// repeated key (e.g. match_height twice) still counts.
+	// A field that has at least one constraint is non-empty, so a repeated key
+	// (e.g. match_height twice) still counts.
 
 	if (!ByteWidth.empty() || !StructureByteStride.empty())
 		matches_tex1d = matches_tex2d = matches_tex3d = false;

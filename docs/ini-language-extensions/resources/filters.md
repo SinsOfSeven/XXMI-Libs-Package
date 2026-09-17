@@ -169,13 +169,15 @@ The hook points are already marked in the code:
 
 Filtering will reuse the same `FilterExpr` matcher, with the shader hash (the 16-digit form accepted by `->Match(...)`) and/or the shader's derived bytecode as the match context instead of a resource description.
 
-## Refactor note
+## Relationship to fuzzy texture overrides
 
-Fuzzy texture override matching and filters share the same matching core (`FuzzyMatch`), but the two engines currently expose it differently: `FuzzyMatchResourceDesc` stores one `FuzzyMatch` per field, while `FilterMatch` stores a `FilterField` (a list of `FuzzyMatch` constraints that are ANDed) per field.
+Filters and fuzzy `[TextureOverride]` sections share a single matching implementation: a `[TextureOverride]`'s conditions are stored in the exact same `FilterMatch` structure a `[Filter<Name>]` section uses (`TextureOverride::filter`). As a result, the same `match_*` fields and the same numeric grammar apply to both, and a `[TextureOverride]` can now combine constraints just like a filter:
 
-The intended follow-up refactor is to migrate the fuzzy `TextureOverride` matcher to `FilterField` as well, so that:
-* `match_height = >100 & <500` works for texture overrides too.
-* Repeated `match_*` keys in a `[TextureOverride]` section are allowed.
-* Both engines share a single description-matching implementation.
+```ini
+[TextureOverrideExample]
+hash = 1234abcd
+match_height = >100 & <500
+match_index_count = >=6
+```
 
-Until then, `&` chaining and repeated keys are only supported in `[Filter...]` sections.
+The differences are only in what the section *does* once it matches (a `[TextureOverride]` applies its command lists; a `[Filter]` evaluates to `1.0`/`0.0`) and in the defaults: a fuzzy `[TextureOverride]` defaults `match_usage=default`, whereas a filter does not.
