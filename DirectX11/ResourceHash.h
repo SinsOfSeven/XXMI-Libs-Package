@@ -11,6 +11,7 @@
 
 #include "util.h"
 #include "DrawCallInfo.h"
+#include "Filter.h"
 
 // A cache-friendly hash table implementation using:
 // - Contiguous storage(std::vector)
@@ -761,48 +762,7 @@ static EnumName_t<const wchar_t *, ResourceMiscFlags> ResourceMiscFlagNames[] = 
 	{NULL, ResourceMiscFlags::INVALID} // End of list marker
 };
 
-enum class FuzzyMatchOp {
-	ALWAYS,
-	EQUAL,
-	LESS,
-	LESS_EQUAL,
-	GREATER,
-	GREATER_EQUAL,
-	NOT_EQUAL,
-};
-
-enum class FuzzyMatchOperandType {
-	VALUE,
-	WIDTH,      // Width, Height & Depth useful for checking
-	HEIGHT,     // for square/cube/rectangular textures.
-	DEPTH,
-	ARRAY,      // Probably not useful, but similar to depth
-	RES_WIDTH,  // Useful for detecting full screen buffers
-	RES_HEIGHT, // including arbitrary multiples of the resolution
-};
-
-class FuzzyMatch {
-	bool matches_common(UINT lhs, UINT effective) const;
-public:
-	FuzzyMatchOp op;
-	FuzzyMatchOperandType rhs_type1;
-	FuzzyMatchOperandType rhs_type2;
-
-	// TODO: Support more operand types, such as texture/resolution
-	// width/height. Maybe for advanced usage even allow an operand to be
-	// an ini param so it can be changed on the fly (might be useful for
-	// MEA to replace the mid-game profile switch, but I'd be surprised if
-	// there isn't a better way to achieve that).
-	UINT val;
-	UINT mask;
-	UINT numerator;
-	UINT denominator;
-
-	FuzzyMatch();
-	template <typename DescType>
-	bool matches(UINT lhs, const DescType *desc) const;
-	bool matches_uint(UINT lhs) const;
-};
+// FuzzyMatch, FilterField, FilterMatch and FilterExpr live in Filter.h.
 
 // Forward declaration to resolve circular dependency. One of these days we
 // really need to start splitting everything out of globals and making an
@@ -855,166 +815,7 @@ public:
 	bool update_types_matched();
 };
 
-// A single filterable field on a resource. Unlike the scalar FuzzyMatch used
-// by FuzzyMatchResourceDesc, a FilterField collects every constraint written
-// for it in a [Filter] section (joined with '&'), and every constraint must
-// pass for the field to match. This allows lower & upper bounds on the same
-// field (e.g. match_height = >100 & <500).
-class FilterField {
-public:
-	bool empty() const { return values.empty(); }
-	void add(const FuzzyMatch &m) { values.push_back(m); }
-
-	// Matches the field value against a typed resource description. NOTE: Only
-	// safe to instantiate in translation units where FuzzyMatch::matches is
-	// defined (i.e. ResourceHash.cpp), so keep the call sites of these out of
-	// other files - use the concrete FilterMatch::matches() overloads instead.
-	template <typename DescType>
-	bool matches(UINT lhs, const DescType *desc) const
-	{
-		for (const FuzzyMatch &m : values) {
-			if (!m.matches(lhs, desc))
-				return false;
-		}
-		return true;
-	}
-
-	// Matches the field value directly (draw context fields, where the RHS of
-	// every constraint must be a literal value).
-	bool matches_uint(UINT lhs) const
-	{
-		for (const FuzzyMatch &m : values) {
-			if (!m.matches_uint(lhs))
-				return false;
-		}
-		return true;
-	}
-private:
-	std::vector<FuzzyMatch> values;
-};
-
-// Forward declaration to resolve the include cycle (CustomResource is defined
-// in CommandList.h, which includes this header):
-class CustomResource;
-
-// A single [Filter<Name>] section: a set of constraints on resource
-// descriptions (and optionally the draw context) that can be evaluated against
-// any resource from a command list via the `->Match(<expression>)` member
-// (see FilterExpr for how several filters are combined). Unlike a fuzzy
-// [TextureOverride], a filter is pure - it never maps
-// to a TextureOverride, so evaluating one is cheap, and it can also match the
-// *declared* fields of a custom resource ([Resource...] section) rather than
-// only live D3D11 resources.
-//
-// TODO(shader filters): a shader-matched filter will reuse this class, but its
-// match context is derived shader data (bytecode reflection / bindings) rather
-// than a resource description. Add shader-side fields here when that lands.
-class FilterMatch {
-public:
-	wstring name; // Lowercased section id, as registered in G->mFilters
-
-	bool matches_buffer;
-	bool matches_tex1d;
-	bool matches_tex2d;
-	bool matches_tex3d;
-
-	FilterField Usage;               // Common
-	FilterField BindFlags;           // Common
-	FilterField CPUAccessFlags;      // Common
-	FilterField MiscFlags;           // Common
-	FilterField ByteWidth;           // Buffer+StructuredBuffer
-	FilterField StructureByteStride; // StructuredBuffer
-	FilterField MipLevels;           // 1D+2D+3D
-	FilterField Format;              // 1D+2D+3D
-	FilterField Width;               // 1D+2D+3D
-	FilterField Height;              //    2D+3D
-	FilterField Depth;               //       3D
-	FilterField ArraySize;           // 1D+2D
-	FilterField SampleDesc_Count;    //    2D
-	FilterField SampleDesc_Quality;  //    2D
-
-	// Draw context fields, evaluated against the DrawCallInfo of the current
-	// command list run (e.g. match_index_count = >6):
-	FilterField FirstVertex;
-	FilterField FirstIndex;
-	FilterField FirstInstance;
-	FilterField VertexCount;
-	FilterField IndexCount;
-	FilterField InstanceCount;
-
-	FilterMatch();
-	bool matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const CustomResource *resource, const DrawCallInfo *call_info) const;
-
-	void set_resource_type(D3D11_RESOURCE_DIMENSION type);
-	bool update_types_matched();
-
-private:
-	bool matches_draw_conditions(const DrawCallInfo *call_info) const;
-};
-
-// Composes [Filter<Name>] sections with the boolean operators accepted inside
-// the `->Match(<expression>)` member:
-//
-//   !   NOT   (prefix, highest precedence)
-//   &   AND
-//   ^   XOR
-//   |   OR    (lowest precedence)
-//
-// Operands are filter names, resolved against G->mFilters. Each operator is a
-// unique glyph - there are no aliases (`&&`, `||`, `~` and word forms are
-// syntax errors). Evaluation short-circuits and reuses a single resource fetch
-// for the whole tree.
-//
-// TODO: grouping parentheses are not supported yet - `extract_arguments`
-// (CommandList.cpp) scans for the last `(` and needs a balanced scan first.
-enum class FilterExprOp {
-	LEAF,
-	HASH,
-	AND,
-	OR,
-	XOR,
-	NOT,
-};
-
-class FilterExpr {
-public:
-	FilterExprOp op = FilterExprOp::LEAF;
-
-	// Set for LEAF, null otherwise.
-	std::shared_ptr<const FilterMatch> leaf;
-
-	// Set for HASH: a raw resource/texture hash literal, e.g.
-	// `ps-t0->Match(1234abcd)`. Hashes are singletons - only equality is
-	// supported, and multi-hash matching is written with the boolean operators
-	// (e.g. `->Match(1234abcd | 89abcdef)`).
-	//
-	// TODO(shader filters): this will also be compared against the shader hash
-	// once the persistent derived shader-data lookup lands, so the resource
-	// hash passed to matches() becomes a context-dependent value.
-	uint64_t hash = 0;
-
-	// Set for AND/OR/XOR (one or more children) and NOT (exactly one child).
-	std::vector<std::shared_ptr<const FilterExpr>> children;
-
-	// True if any leaf in this tree is a HASH literal, so the caller can skip
-	// computing a resource hash when it is not actually tested.
-	bool has_hash = false;
-
-	// `resource_hash` is null when no hash is available for the target (e.g. a
-	// custom resource that has not been hashed), in which case HASH leaves
-	// never match.
-	bool matches(const uint64_t *resource_hash, const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const uint64_t *resource_hash, const CustomResource *resource, const DrawCallInfo *call_info) const;
-};
-
-typedef std::map<std::wstring, std::shared_ptr<FilterMatch>> FilterMatches;
+// FilterMatch, FilterExpr and FilterMatches live in Filter.h.
 
 bool TextureOverrideLess(const struct TextureOverride &lhs, const struct TextureOverride &rhs);
 struct FuzzyMatchResourceDescLess {
