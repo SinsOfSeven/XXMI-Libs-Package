@@ -3277,6 +3277,11 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 
 	//LogDebug("ShaderTarget Member Evaluation hash=%016I64x\n", shader_it->second);
 
+	// TODO(shader filters): handle ShaderTargetEvaluationMode::RESERVED_SHADER_FILTER
+	// here, before the cache lookup below (which currently asserts the shader is
+	// registered). Evaluation should reuse the FilterExpr matcher with the shader
+	// hash and/or its derived bytecode as the match context.
+
 	auto it = G->mShaderBindingsCache.find(shader_it->second);
 	if (it == G->mShaderBindingsCache.end()) {
 		assert(false);
@@ -8092,6 +8097,9 @@ IniParserResult ShaderTarget::ParseTargetMember(
 )
 {
 	//LogInfo("ShaderTarget::ParseTargetMember: target=%ls, length=%d\n", target, length);
+
+	// TODO(shader filters): add a `->match` member here (and remove the
+	// RESERVED_SHADER_FILTER placeholder) once shader filtering is implemented.
 
 	if (length < 11) // Smallest possible match is "vs->cb_mask".
 		return IniParserResult::TOKEN_NOT_FOUND;

@@ -613,6 +613,8 @@ struct Globals
 	std::unordered_map<UINT64, ShaderModelCacheEntry> mShaderModelCache;
 
 	CRITICAL_SECTION mShaderBindingsLock;
+	// TODO(shader filters): this cache is the source of shader-filter match data.
+	// See CacheShaderBindings (HackerDevice.cpp).
 	std::unordered_map<UINT64, ShaderBindings> mShaderBindingsCache;
 
 	unordered_map<uint32_t, TextureOverrideFuzzyMatches> mTextureOverrideDrawIndexMap;  // Contains hash+TextureOverrides pairs indexed by match_index_count

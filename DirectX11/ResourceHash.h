@@ -905,6 +905,10 @@ class CustomResource;
 // to a TextureOverride, so evaluating one is cheap, and it can also match the
 // *declared* fields of a custom resource ([Resource...] section) rather than
 // only live D3D11 resources.
+//
+// TODO(shader filters): a shader-matched filter will reuse this class, but its
+// match context is derived shader data (bytecode reflection / bindings) rather
+// than a resource description. Add shader-side fields here when that lands.
 class FilterMatch {
 public:
 	wstring name; // Lowercased section id, as registered in G->mFilters

@@ -157,6 +157,18 @@ Filters are cheap compared to `store`: they read a resource description (and opt
 
 See the [Resource Metadata](resource-metadata.md#match) documentation for the `->Match(<expression>)` member details.
 
+## Planned: shader matching
+
+Filters currently only match resources. Matching shaders (for example `ps->Match(...)`, or a filter that constrains a shader's declared constant buffers and resources) is planned but not implemented.
+
+The hook points are already marked in the code:
+
+* `ShaderTargetEvaluationMode::RESERVED_SHADER_FILTER` reserves a mode for it.
+* `CommandListOperand::process_shader_filter` is where the new mode must be handled, **before** the `mShaderBindingsCache` lookup (which currently assumes the shader is registered).
+* `CacheShaderBindings` / `get_shader_bindings_from_bytecode` provide the derived shader data that shader filters will match against. `HackerDevice.cpp`, `ByteCodeReader.cpp` and `globals.h` all carry `TODO(shader filters)` markers.
+
+Filtering will reuse the same `FilterExpr` matcher, with the shader hash (the 16-digit form accepted by `->Match(...)`) and/or the shader's derived bytecode as the match context instead of a resource description.
+
 ## Refactor note
 
 Fuzzy texture override matching and filters share the same matching core (`FuzzyMatch`), but the two engines currently expose it differently: `FuzzyMatchResourceDesc` stores one `FuzzyMatch` per field, while `FilterMatch` stores a `FilterField` (a list of `FuzzyMatch` constraints that are ANDed) per field.
