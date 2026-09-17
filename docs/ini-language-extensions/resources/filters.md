@@ -2,7 +2,7 @@
 
 A `[Filter<Name>]` section declaratively describes **which resources a piece of logic is interested in**. Unlike a fuzzy `[TextureOverride]`, a filter is pure — it does not map to a shader override, it simply evaluates to `1.0` (match) or `0.0` (no match) when a command list runs against a resource.
 
-A filter is evaluated with the `->Match(<expression>)` resource member, which can be used anywhere an expression is accepted. It accepts a single filter name or a boolean expression combining several filters, so filters can be tested directly, combined, or composed into a score.
+A filter is evaluated with the `->Match(<expression>)` resource member, which can be used anywhere an expression is accepted. It accepts a single filter name, a raw resource hash, or a boolean expression combining several of them, so resources can be tested directly, combined, or composed into a score.
 
 ## Declaring a filter
 
@@ -116,9 +116,25 @@ $one_of   = ps-t0->Match(FilterA ^ FilterB)     ; exactly one of A, B
 
 Grouping parentheses are **not** supported yet, so expressions are precedence-only: `->Match((A | B) & C)` is a syntax error. Reorder or split the expression instead.
 
+## Matching raw hashes
+
+A bare resource hash can be matched directly, without declaring a `[Filter...]` section. It must be exactly 8 or 16 hexadecimal digits with no `0x` prefix:
+
+```ini
+$is_known = ps-t0->Match(1234abcd)
+```
+
+Hashes are singletons and only compare equal, so accepting several of them is done with the boolean operators rather than by listing them together:
+
+```ini
+$is_either = ps-t0->Match(1234abcd | 89abcdef)
+```
+
+8 digits are the current 32-bit texture hash; 16 digits are reserved for the future shader hash. A purely hexadecimal token is never ambiguous with a filter name because a name always carries the `Filter` prefix, which contains non-hex letters. Custom resources (`[Resource...]`) are not content-hashed yet, so hash literals never match against them.
+
 ## Usage
 
-`Resource->Match(<expression>)` is an expression operand, where `Resource` is any resource target (`ps-t0`, `ResourceFoo`, `PoolFoo[0]`, …) and `<expression>` is a filter name or a boolean expression over filter names (see [Composing filters](#composing-filters)). It evaluates to `1.0` on a match, `0.0` when the resource is bound but does not match, and `-0.0` when the resource cannot be resolved (for example an unbound pipeline slot).
+`Resource->Match(<expression>)` is an expression operand, where `Resource` is any resource target (`ps-t0`, `ResourceFoo`, `PoolFoo[0]`, …) and `<expression>` is a filter name, a raw resource hash, or a boolean expression over any of them (see [Composing filters](#composing-filters) and [Matching raw hashes](#matching-raw-hashes)). It evaluates to `1.0` on a match, `0.0` when the resource is bound but does not match, and `-0.0` when the resource cannot be resolved (for example an unbound pipeline slot).
 
 ```ini
 [CommandListSelect]

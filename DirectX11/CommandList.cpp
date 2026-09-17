@@ -8147,6 +8147,24 @@ IniParserResult ResourceCopyTarget::ParseTargetPrefix(const wchar_t*& target, si
 
 namespace {
 
+// Accepts a bare texture hash literal: exactly 8 or 16 hex digits with no
+// prefix (commands are lowercased, so only lowercase digits occur). 8 digits
+// are the current 32-bit texture hash; 16 digits are reserved for the future
+// 64-bit shader hash.
+static bool parse_hash_literal(const std::wstring &token, uint64_t *hash)
+{
+	if (token.size() != 8 && token.size() != 16)
+		return false;
+
+	for (wchar_t c : token) {
+		if (!wcschr(L"0123456789abcdef", c))
+			return false;
+	}
+
+	*hash = wcstoull(token.c_str(), nullptr, 16);
+	return true;
+}
+
 // Parses a filter expression as accepted by the `->Match(<expression>)`
 // member, e.g. `Filter2k | !Filter4k`. Grammar, highest precedence first:
 //
@@ -8156,7 +8174,8 @@ namespace {
 //   or    := xor   ( '|' xor   )*
 //
 // Each operand is a [Filter<Name>] section name, resolved namespaced-first then
-// plain. Returns null and logs a warning on a syntax error or unknown name.
+// plain, or a raw texture hash literal (8 or 16 hex digits, no prefix). Returns
+// null and logs a warning on a syntax error or unknown name.
 class FilterExpressionParser
 {
 public:
@@ -8206,6 +8225,7 @@ private:
 	{
 		std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
 		node->op = op;
+		node->has_hash = (lhs && lhs->has_hash) || (rhs && rhs->has_hash);
 		node->children.push_back(std::move(lhs));
 		node->children.push_back(std::move(rhs));
 		return node;
@@ -8275,6 +8295,7 @@ private:
 				return nullptr;
 			std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
 			node->op = FilterExprOp::NOT;
+			node->has_hash = child->has_hash;
 			node->children.push_back(std::move(child));
 			return node;
 		}
@@ -8309,6 +8330,15 @@ private:
 		if (it == G->mFilters.end())
 			it = G->mFilters.find(filter_name);
 		if (it == G->mFilters.end()) {
+			uint64_t hash;
+			if (parse_hash_literal(filter_name, &hash)) {
+				std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
+				node->op = FilterExprOp::HASH;
+				node->hash = hash;
+				node->has_hash = true;
+				return node;
+			}
+
 			LogOverlayW(LOG_WARNING, L"Unknown filter \"%ls\"\n", filter_name.c_str());
 			return nullptr;
 		}
@@ -11257,7 +11287,11 @@ float ResourceCopyTarget::EvaluateResourceFilter(CommandListState* state)
 		if (!custom_resource)
 			return -0.0f;
 
-		return filter->matches(custom_resource, state->call_info) ? 1.0f : 0.0f;
+		// TODO(shader filters): custom resources are not content-hashed yet, so
+		// pass no hash and let hash literals never match. Hashing them on the
+		// fly (or caching a hash on the CustomResource) would let
+		// `ResourceFoo->Match(<hash>)` work.
+		return filter->matches(nullptr, custom_resource, state->call_info) ? 1.0f : 0.0f;
 	}
 
 	ID3D11View* view = nullptr;
@@ -11266,6 +11300,15 @@ float ResourceCopyTarget::EvaluateResourceFilter(CommandListState* state)
 
 	if (!resource)
 		return -0.0f;
+
+	// Only compute the (locked) resource hash if the expression actually tests
+	// it. The hash is a 32-bit texture hash zero-extended into 64 bits.
+	uint64_t resource_hash = 0;
+	const uint64_t* resource_hash_ptr = nullptr;
+	if (filter->has_hash) {
+		resource_hash = GetResourceHashSafe(resource);
+		resource_hash_ptr = &resource_hash;
+	}
 
 	bool matched = false;
 
@@ -11276,25 +11319,25 @@ float ResourceCopyTarget::EvaluateResourceFilter(CommandListState* state)
 		case D3D11_RESOURCE_DIMENSION_BUFFER: {
 			D3D11_BUFFER_DESC desc;
 			static_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
-			matched = filter->matches(&desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
 			break;
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
 			D3D11_TEXTURE1D_DESC desc;
 			static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
-			matched = filter->matches(&desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
 			break;
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
 			D3D11_TEXTURE2D_DESC desc;
 			static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
-			matched = filter->matches(&desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
 			break;
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
 			D3D11_TEXTURE3D_DESC desc;
 			static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
-			matched = filter->matches(&desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
 			break;
 		}
 	}

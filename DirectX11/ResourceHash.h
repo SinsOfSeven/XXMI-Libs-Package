@@ -611,6 +611,9 @@ uint32_t CalcTexture3DDataHash(const D3D11_TEXTURE3D_DESC *pDesc, const D3D11_SU
 ResourceHandleInfo* GetResourceHandleInfo(ID3D11Resource *resource);
 uint32_t GetOrigResourceHash(ID3D11Resource *resource);
 uint32_t GetResourceHash(ID3D11Resource *resource);
+// Thread-safe wrapper around GetResourceHash() that acquires the critical
+// section. Returns 0 if the resource has not been hashed.
+uint32_t GetResourceHashSafe(ID3D11Resource *resource);
 static bool CacheBufferData(HackerContext* context, ID3D11Buffer* buffer, ResourceHandleInfo* info);
 void ClearResourceRegionHashCache(ID3D11Resource* resource);
 UINT GetVertexBufferRegionOffset(UINT stride, DrawCallInfo* call_info, UINT byte_offset);
@@ -966,6 +969,7 @@ private:
 // (CommandList.cpp) scans for the last `(` and needs a balanced scan first.
 enum class FilterExprOp {
 	LEAF,
+	HASH,
 	AND,
 	OR,
 	XOR,
@@ -979,14 +983,31 @@ public:
 	// Set for LEAF, null otherwise.
 	std::shared_ptr<const FilterMatch> leaf;
 
+	// Set for HASH: a raw resource/texture hash literal, e.g.
+	// `ps-t0->Match(1234abcd)`. Hashes are singletons - only equality is
+	// supported, and multi-hash matching is written with the boolean operators
+	// (e.g. `->Match(1234abcd | 89abcdef)`).
+	//
+	// TODO(shader filters): this will also be compared against the shader hash
+	// once the persistent derived shader-data lookup lands, so the resource
+	// hash passed to matches() becomes a context-dependent value.
+	uint64_t hash = 0;
+
 	// Set for AND/OR/XOR (one or more children) and NOT (exactly one child).
 	std::vector<std::shared_ptr<const FilterExpr>> children;
 
-	bool matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const CustomResource *resource, const DrawCallInfo *call_info) const;
+	// True if any leaf in this tree is a HASH literal, so the caller can skip
+	// computing a resource hash when it is not actually tested.
+	bool has_hash = false;
+
+	// `resource_hash` is null when no hash is available for the target (e.g. a
+	// custom resource that has not been hashed), in which case HASH leaves
+	// never match.
+	bool matches(const uint64_t *resource_hash, const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const uint64_t *resource_hash, const CustomResource *resource, const DrawCallInfo *call_info) const;
 };
 
 typedef std::map<std::wstring, std::shared_ptr<FilterMatch>> FilterMatches;

@@ -1923,20 +1923,22 @@ bool FilterMatch::update_types_matched()
 // template lets the concrete FilterMatch::matches() overloads be resolved by
 // the caller's descriptor type.
 template <typename DescType>
-static bool filter_expr_matches(const FilterExpr &expr, const DescType *desc, const DrawCallInfo *call_info)
+static bool filter_expr_matches(const FilterExpr &expr, const uint64_t *resource_hash, const DescType *desc, const DrawCallInfo *call_info)
 {
 	switch (expr.op) {
 		case FilterExprOp::LEAF:
 			return expr.leaf && expr.leaf->matches(desc, call_info);
+		case FilterExprOp::HASH:
+			return resource_hash && expr.hash == *resource_hash;
 		case FilterExprOp::AND:
 			for (const auto &child : expr.children) {
-				if (child && !filter_expr_matches(*child, desc, call_info))
+				if (child && !filter_expr_matches(*child, resource_hash, desc, call_info))
 					return false;
 			}
 			return true;
 		case FilterExprOp::OR:
 			for (const auto &child : expr.children) {
-				if (child && filter_expr_matches(*child, desc, call_info))
+				if (child && filter_expr_matches(*child, resource_hash, desc, call_info))
 					return true;
 			}
 			return false;
@@ -1945,41 +1947,41 @@ static bool filter_expr_matches(const FilterExpr &expr, const DescType *desc, co
 			// the operator stays associative for longer chains.
 			bool result = false;
 			for (const auto &child : expr.children) {
-				if (child && filter_expr_matches(*child, desc, call_info))
+				if (child && filter_expr_matches(*child, resource_hash, desc, call_info))
 					result = !result;
 			}
 			return result;
 		}
 		case FilterExprOp::NOT:
 			return expr.children.size() == 1
-				&& !filter_expr_matches(*expr.children[0], desc, call_info);
+				&& !filter_expr_matches(*expr.children[0], resource_hash, desc, call_info);
 	}
 	return false;
 }
 
-bool FilterExpr::matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const
 {
-	return filter_expr_matches(*this, desc, call_info);
+	return filter_expr_matches(*this, resource_hash, desc, call_info);
 }
 
-bool FilterExpr::matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const
 {
-	return filter_expr_matches(*this, desc, call_info);
+	return filter_expr_matches(*this, resource_hash, desc, call_info);
 }
 
-bool FilterExpr::matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const
 {
-	return filter_expr_matches(*this, desc, call_info);
+	return filter_expr_matches(*this, resource_hash, desc, call_info);
 }
 
-bool FilterExpr::matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const
 {
-	return filter_expr_matches(*this, desc, call_info);
+	return filter_expr_matches(*this, resource_hash, desc, call_info);
 }
 
-bool FilterExpr::matches(const CustomResource *resource, const DrawCallInfo *call_info) const
+bool FilterExpr::matches(const uint64_t *resource_hash, const CustomResource *resource, const DrawCallInfo *call_info) const
 {
-	return filter_expr_matches(*this, resource, call_info);
+	return filter_expr_matches(*this, resource_hash, resource, call_info);
 }
 
 static bool matches_draw_info(TextureOverride *tex_override, DrawCallInfo *call_info)
@@ -2021,7 +2023,7 @@ void find_texture_override_for_hash(uint32_t hash, TextureOverrideMatches *match
 	}
 }
 
-static uint32_t get_hash_for_resource(ID3D11Resource* resource)
+uint32_t GetResourceHashSafe(ID3D11Resource* resource)
 {
 	if (!resource)
 		return 0;
@@ -2031,6 +2033,18 @@ static uint32_t get_hash_for_resource(ID3D11Resource* resource)
 	LeaveCriticalSection(&G->mCriticalSection);
 
 	return hash;
+}
+
+void find_texture_overrides_for_resource_by_hash(ID3D11Resource *resource, TextureOverrideMatches *matches, DrawCallInfo *call_info)
+{
+	if (G->mTextureOverrideMap.empty())
+		return;
+
+	uint32_t hash = GetResourceHashSafe(resource);
+	if (!hash)
+		return;
+
+	find_texture_override_for_hash(hash, matches, call_info);
 }
 
 TextureOverrideFuzzyMatches* get_fuzzy_matches_by_draw_info(DrawCallInfo* call_info)
@@ -2065,7 +2079,7 @@ void find_texture_overrides_by_hash_from_fuzzy_matches(uint32_t hash, TextureOve
 
 void find_texture_overrides_for_resource_by_hash_from_fuzzy_matches(ID3D11Resource* resource, TextureOverrideFuzzyMatches* fuzzy_matches, TextureOverrideMatches* matches, DrawCallInfo* call_info)
 {
-	uint32_t hash = get_hash_for_resource(resource);
+	uint32_t hash = GetResourceHashSafe(resource);
 	if (!hash)
 		return;
 
