@@ -163,9 +163,14 @@ bool FilterMatch::matches_draw_conditions(const DrawCallInfo *call_info) const
 
 bool FilterMatch::matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const
 {
-	if (!matches_buffer)
-		return false;
 	if (!matches_draw_conditions(call_info))
+		return false;
+	return matches_desc(desc);
+}
+
+bool FilterMatch::matches_desc(const D3D11_BUFFER_DESC *desc) const
+{
+	if (!matches_buffer)
 		return false;
 
 	if (!Usage.matches(desc->Usage, desc))
@@ -185,9 +190,14 @@ bool FilterMatch::matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *cal
 
 bool FilterMatch::matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const
 {
-	if (!matches_tex1d)
-		return false;
 	if (!matches_draw_conditions(call_info))
+		return false;
+	return matches_desc(desc);
+}
+
+bool FilterMatch::matches_desc(const D3D11_TEXTURE1D_DESC *desc) const
+{
+	if (!matches_tex1d)
 		return false;
 
 	if (!Usage.matches(desc->Usage, desc))
@@ -211,9 +221,14 @@ bool FilterMatch::matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *
 
 bool FilterMatch::matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const
 {
-	if (!matches_tex2d)
-		return false;
 	if (!matches_draw_conditions(call_info))
+		return false;
+	return matches_desc(desc);
+}
+
+bool FilterMatch::matches_desc(const D3D11_TEXTURE2D_DESC *desc) const
+{
+	if (!matches_tex2d)
 		return false;
 
 	if (!Usage.matches(desc->Usage, desc))
@@ -243,9 +258,14 @@ bool FilterMatch::matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *
 
 bool FilterMatch::matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const
 {
-	if (!matches_tex3d)
-		return false;
 	if (!matches_draw_conditions(call_info))
+		return false;
+	return matches_desc(desc);
+}
+
+bool FilterMatch::matches_desc(const D3D11_TEXTURE3D_DESC *desc) const
+{
+	if (!matches_tex3d)
 		return false;
 
 	if (!Usage.matches(desc->Usage, desc))

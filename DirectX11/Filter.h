@@ -172,6 +172,14 @@ public:
 	bool matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
 	bool matches(const CustomResource *resource, const DrawCallInfo *call_info) const;
 
+	// Description-only match, ignoring any draw context conditions. Used to
+	// build the per-resource fuzzy candidate cache, which is filtered per draw
+	// with matches_draw_conditions() afterwards:
+	bool matches_desc(const D3D11_BUFFER_DESC *desc) const;
+	bool matches_desc(const D3D11_TEXTURE1D_DESC *desc) const;
+	bool matches_desc(const D3D11_TEXTURE2D_DESC *desc) const;
+	bool matches_desc(const D3D11_TEXTURE3D_DESC *desc) const;
+
 	void set_resource_type(D3D11_RESOURCE_DIMENSION type);
 	bool update_types_matched();
 

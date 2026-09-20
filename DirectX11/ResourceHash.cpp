@@ -1461,7 +1461,7 @@ static void collect_fuzzy_texture_overrides_for_desc(const DescType *desc, std::
 	}
 
 	for (i = G->mFuzzyTextureOverrides.begin(); i != G->mFuzzyTextureOverrides.end(); i++) {
-		if ((*i)->matches(desc))
+		if ((*i)->texture_override->filter.matches_desc(desc))
 			out->push_back((*i)->texture_override);
 	}
 
@@ -1578,7 +1578,7 @@ void find_fuzzy_texture_overrides_for_resource(ID3D11Resource *resource, Texture
 	TextureOverrideCandidates *candidates = get_texture_override_candidates(resource);
 	if (candidates) {
 		for (TextureOverride *to : candidates->fuzzy_matches) {
-			if (matches_draw_info(to, call_info))
+			if (to->filter.matches_draw_conditions(call_info))
 				matches->push_back(to);
 		}
 	}
@@ -1656,12 +1656,12 @@ void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverri
 	if (candidates) {
 		if (candidates->hash_matches) {
 			for (TextureOverride &to : *candidates->hash_matches) {
-				if (matches_draw_info(&to, call_info))
+				if (to.filter.matches_draw_conditions(call_info))
 					matches->push_back(&to);
 			}
 		}
 		for (TextureOverride *to : candidates->fuzzy_matches) {
-			if (matches_draw_info(to, call_info))
+			if (to->filter.matches_draw_conditions(call_info))
 				matches->push_back(to);
 		}
 	}
