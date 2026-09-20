@@ -69,6 +69,7 @@
 #include "Override.h"
 #include "IniHandler.h"
 #include "CommandList.h"
+#include "ShaderRegex.h"
 #include "profiling.h"
 #include "cursor.h" // For InstallHookLate
 
@@ -199,6 +200,12 @@ void HackerSwapChain::RunFrameActions()
 	// Regardless of log settings, since this runs every frame, let's flush the log
 	// so that the most lost will be one frame worth.  Tradeoff of performance to accuracy
 	if (LogFile) fflush(LogFile);
+
+	// Same idea for the ShaderRegex cache metadata: new records are written
+	// every time a shader is first analysed, so instead of blocking the draw
+	// thread with a full metadata rewrite per shader we defer to here:
+	if (!shader_regex_cache_flush())
+		LogWarning("ShaderRegexCache: per-frame flush FAILED\n");
 
 	uint64_t system_tick_count = GetSystemTicks();
 
