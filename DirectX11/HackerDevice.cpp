@@ -2717,6 +2717,12 @@ STDMETHODIMP HackerDevice::CreateGeometryShaderWithStreamOutput(THIS_
 	// TODO: This is another call that can create geometry and/or vertex
 	// shaders - hook them up and allow them to be overridden as well.
 
+	// TODO: Stream-output geometry shaders bypass CreateShader entirely, so
+	// their bytecode is never captured in ShaderBytecodeRecord nor fed into
+	// the ShaderRegex cache. Route this through CreateShader (or at least
+	// hash + shader_bytecode_record_save + shader_regex_cache lookup/save)
+	// so cache rebuilding covers stream-output shaders too.
+
 	HRESULT hr = mOrigDevice1->CreateGeometryShaderWithStreamOutput(pShaderBytecode, BytecodeLength, pSODeclaration,
 		NumEntries, pBufferStrides, NumStrides, RasterizedStream, pClassLinkage, ppGeometryShader);
 	LogInfo("  returns result = %x, handle = %p\n", hr, (ppGeometryShader ? *ppGeometryShader : NULL));
