@@ -558,7 +558,6 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 
 	switch (load_shader_regex_cache(hash, shader_type, &patched_bytecode, &tagline)) {
 	case ShaderRegexCache::NO_MATCH:
-		LogInfo("%S %016I64x has cached ShaderRegex miss\n", shader_type, hash);
 		goto out_drop;
 	case ShaderRegexCache::MATCH:
 		LogInfo("Loaded %S %016I64x command list from ShaderRegex cache\n", shader_type, hash);
@@ -599,20 +598,12 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 			goto out_drop;
 		}
 
-		// Disassemble shader bytecode.
 		asm_text = BinaryToAsmText(
 			orig_info->byteCode->GetBufferPointer(),
 			orig_info->byteCode->GetBufferSize(),
 			G->patch_cb_offsets,
 			G->disassemble_undecipherable_custom_data);
 
-		if (asm_text.empty())
-			goto out_drop;
-
-		asm_text = BinaryToAsmText(orig_info->byteCode->GetBufferPointer(),
-				orig_info->byteCode->GetBufferSize(),
-				G->patch_cb_offsets,
-				G->disassemble_undecipherable_custom_data);
 		if (asm_text.empty())
 			goto out_drop;
 

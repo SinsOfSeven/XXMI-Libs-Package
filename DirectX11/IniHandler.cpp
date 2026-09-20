@@ -4708,6 +4708,7 @@ void LoadConfigFile()
 	}
 
 	G->CACHE_SHADERS = GetIniBool(L"Rendering", L"cache_shaders", false, NULL);
+	G->DISABLE_REGEX_CACHE = GetIniBool(L"Rendering", L"disable_shader_regex_cache", false, NULL);
 	G->SCISSOR_DISABLE = GetIniBool(L"Rendering", L"rasterizer_disable_scissor", false, NULL);
 	G->track_texture_updates = GetIniBoolOrInt(L"Rendering", L"track_texture_updates", 0, NULL);
 	G->track_region_hashes = GetIniBool(L"Rendering", L"track_region_hashes", false, NULL);
@@ -5205,6 +5206,12 @@ void ReloadConfig(HackerDevice *device)
 
 		MarkAllShadersDeferredUnprocessed();
 	}
+
+	// Make any deferred ShaderRegex cache metadata writes durable before the
+	// reload finishes, so a subsequent (non-generation-changing) reload doesn't
+	// lose records that were still sitting in the dirty buffer:
+	if (!shader_regex_cache_flush())
+		LogWarning("ShaderRegexCache: reload flush FAILED\n");
 
 	// Execute the [Constants] command list in the immediate context to
 	// initialise iniParams and perform any other custom initialisation the

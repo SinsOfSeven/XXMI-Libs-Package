@@ -20,6 +20,7 @@
     <ClCompile Include="HookedDevice.cpp" />
     <ClCompile Include="..\D3D_Shaders\SignatureParser.cpp" />
     <ClCompile Include="ShaderRegex.cpp" />
+    <ClCompile Include="ShaderStore.cpp" />
     <ClCompile Include="HookAddresses.c" />
     <ClCompile Include="HackerDXGI.cpp" />
     <ClCompile Include="..\iid.cpp" />
@@ -58,6 +59,8 @@
     <ClInclude Include="HookedDevice.h" />
     <ClInclude Include="..\shader.h" />
     <ClInclude Include="ShaderRegex.h" />
+    <ClInclude Include="ShaderStage.h" />
+    <ClInclude Include="ShaderStore.h" />
     <ClInclude Include="FrameAnalysis.h" />
     <ClInclude Include="HackerDXGI.h" />
     <ClInclude Include="profiling.h" />

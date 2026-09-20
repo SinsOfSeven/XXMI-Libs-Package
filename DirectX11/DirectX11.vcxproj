@@ -68,6 +68,7 @@
     <ClCompile Include="profiling.cpp" />
     <ClCompile Include="ResourceHash.cpp" />
     <ClCompile Include="ShaderRegex.cpp" />
+    <ClCompile Include="ShaderStore.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="d3d11Wrapper.def" />
@@ -103,6 +104,8 @@
     <ClInclude Include="profiling.h" />
     <ClInclude Include="ResourceHash.h" />
     <ClInclude Include="ShaderRegex.h" />
+    <ClInclude Include="ShaderStage.h" />
+    <ClInclude Include="ShaderStore.h" />
     <ClInclude Include="..\vkeys.h" />
   </ItemGroup>
   <ItemGroup>

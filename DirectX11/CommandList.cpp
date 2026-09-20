@@ -3,6 +3,7 @@
 #include "lock.h"
 
 #include "CommandList.h"
+#include "ShaderStage.h"
 
 #include <DDSTextureLoader.h>
 #include <algorithm>
@@ -2291,33 +2292,34 @@ bool CustomShader::compile(char type, wchar_t *filename, const wstring *wname, c
 
 	LogInfo("  %cs=%S\n", type, filename);
 
-	switch(type) {
-		case 'v':
+	ShaderStage stage = shader_stage_from_letter(type);
+	switch (stage) {
+		case ShaderStage::VS:
 			ppBytecode = &vs_bytecode;
 			macros = vs_macros;
 			vs_override = true;
 			break;
-		case 'h':
+		case ShaderStage::HS:
 			ppBytecode = &hs_bytecode;
 			macros = hs_macros;
 			hs_override = true;
 			break;
-		case 'd':
+		case ShaderStage::DS:
 			ppBytecode = &ds_bytecode;
 			macros = ds_macros;
 			ds_override = true;
 			break;
-		case 'g':
+		case ShaderStage::GS:
 			ppBytecode = &gs_bytecode;
 			macros = gs_macros;
 			gs_override = true;
 			break;
-		case 'p':
+		case ShaderStage::PS:
 			ppBytecode = &ps_bytecode;
 			macros = ps_macros;
 			ps_override = true;
 			break;
-		case 'c':
+		case ShaderStage::CS:
 			ppBytecode = &cs_bytecode;
 			macros = cs_macros;
 			cs_override = true;

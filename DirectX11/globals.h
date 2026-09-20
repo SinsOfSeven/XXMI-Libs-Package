@@ -500,6 +500,7 @@ struct Globals
 	int texture_hash_version;
 	int EXPORT_HLSL;		// 0=off, 1=HLSL only, 2=HLSL+OriginalASM, 3= HLSL+OriginalASM+recompiledASM
 	bool EXPORT_SHADERS, EXPORT_FIXED, EXPORT_BINARY, CACHE_SHADERS, SCISSOR_DISABLE;
+	bool DISABLE_REGEX_CACHE;
 	int track_texture_updates;
 	bool assemble_signature_comments;
 	bool disassemble_undecipherable_custom_data;
@@ -717,6 +718,7 @@ struct Globals
 		EXPORT_FIXED(false),
 		EXPORT_BINARY(false),
 		CACHE_SHADERS(false),
+		DISABLE_REGEX_CACHE(false),
 		DumpUsage(false),
 		ENABLE_TUNE(false),
 		gTuneStep(0.001f),

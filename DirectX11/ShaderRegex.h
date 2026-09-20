@@ -16,6 +16,21 @@ enum class ShaderRegexCache {
 	PATCH
 };
 
+// Why load_shader_regex_cache() fell through to NO_CACHE. Lets callers and
+// diagnostics tell an ordinary cold-cache miss apart from a corrupted read or
+// a deliberately disabled cache so an adaptive/failure path can react:
+enum class ShaderRegexCacheFailureReason {
+	NONE,
+	DISABLED,             // DISABLE_REGEX_CACHE toggle in effect
+	NO_CACHE_PATH,        // SHADER_CACHE_PATH not configured
+	INVALID_STAGE,        // shader stage is not a known D3D11 stage
+	STALE_GENERATION,     // cache absent or for a previous ShaderRegex generation
+	NO_RECORD,            // no cached record for this shader (cold miss)
+	MATCH_POOL_OOB,       // cached match ids point outside the current group index
+	RECORD_NO_BYTECODE,   // PATCH record whose bytecode was never assembled
+	BLOB_READ_FAILED,     // patched bytecode could not be read back from the blob
+};
+
 bool get_shader_model_from_bytecode(const void* data, size_t size, std::string* out_model);
 
 enum class ShaderConstantBufferType : uint8_t
@@ -59,8 +74,9 @@ struct ShaderBindings
 
 void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::string* shader_model, UINT64 hash, bool* decompilation_required);
 bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline);
-ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode, std::wstring *tagline);
+ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode, std::wstring *tagline, ShaderRegexCacheFailureReason *reason = nullptr);
 void save_shader_regex_cache_bin(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode);
+bool shader_regex_cache_flush();
 bool unlink_shader_regex_command_lists_and_filter_index(UINT64 shader_hash);
 
 typedef std::set<std::string> ShaderRegexTemps;
