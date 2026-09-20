@@ -22,6 +22,7 @@
 //#include "ResourceHash.h"
 //#include "Override.h"
 #include "ShaderRegex.h"
+#include "ShaderBytecodeRecord.h"
 #include "FrameAnalysis.h"
 #include "profiling.h"
 
@@ -567,6 +568,20 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 		break;
 	case ShaderRegexCache::NO_CACHE:
 		LogInfo("Performing deferred shader analysis on %S %016I64x...\n", shader_type, hash);
+
+		// Preserve the original bytecode in the ShaderBytecodeRecord ledger so
+		// the async pre-deferred analysis workers and frame analysis can get
+		// it back later, even after the regex cache generation is wiped. The
+		// ledger deduplicates by (stage, hash), so a re-analysis after a
+		// generation change just bumps the record's access count:
+		{
+			const void *raw = orig_info->byteCode->GetBufferPointer();
+			size_t raw_size = orig_info->byteCode->GetBufferSize();
+			std::vector<uint8_t> original_bytecode(
+					static_cast<const uint8_t *>(raw),
+					static_cast<const uint8_t *>(raw) + raw_size);
+			shader_bytecode_record_save(hash, shader_type, &original_bytecode);
+		}
 
 		// Detect shader model
 		auto it = G->mShaderModelCache.find(hash);

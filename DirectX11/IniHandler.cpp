@@ -15,6 +15,7 @@
 #include "Override.h"
 #include "Hunting.h"
 #include "ShaderRegex.h"
+#include "ShaderBytecodeRecord.h"
 #include "cursor.h"
 #include <chrono>
 
@@ -5212,6 +5213,8 @@ void ReloadConfig(HackerDevice *device)
 	// lose records that were still sitting in the dirty buffer:
 	if (!shader_regex_cache_flush())
 		LogWarning("ShaderRegexCache: reload flush FAILED\n");
+	if (!shader_bytecode_record_flush())
+		LogWarning("ShaderBytecodeRecord: reload flush FAILED\n");
 
 	// Execute the [Constants] command list in the immediate context to
 	// initialise iniParams and perform any other custom initialisation the
