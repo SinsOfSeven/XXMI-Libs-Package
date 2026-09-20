@@ -2730,6 +2730,12 @@ STDMETHODIMP HackerDevice::CreateGeometryShaderWithStreamOutput(THIS_
 	// The buffers it writes are reachable from the command list as so0..3,
 	// the only handle a fix has on a stream output pass.
 
+	// TODO: Stream-output geometry shaders bypass CreateShader entirely, so
+	// their bytecode is never captured in ShaderBytecodeRecord nor fed into
+	// the ShaderRegex cache. Route this through CreateShader (or at least
+	// hash + shader_bytecode_record_save + shader_regex_cache lookup/save)
+	// so cache rebuilding covers stream-output shaders too.
+
 	HRESULT hr = mOrigDevice1->CreateGeometryShaderWithStreamOutput(pShaderBytecode, BytecodeLength, pSODeclaration,
 		NumEntries, pBufferStrides, NumStrides, RasterizedStream, pClassLinkage, ppGeometryShader);
 	LogInfo("  returns result = %x, handle = %p\n", hr, (ppGeometryShader ? *ppGeometryShader : NULL));
