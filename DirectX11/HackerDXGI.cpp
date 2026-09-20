@@ -70,6 +70,7 @@
 #include "IniHandler.h"
 #include "CommandList.h"
 #include "ShaderRegex.h"
+#include "ShaderBytecodeRecord.h"
 #include "profiling.h"
 #include "cursor.h" // For InstallHookLate
 
@@ -206,6 +207,8 @@ void HackerSwapChain::RunFrameActions()
 	// thread with a full metadata rewrite per shader we defer to here:
 	if (!shader_regex_cache_flush())
 		LogWarning("ShaderRegexCache: per-frame flush FAILED\n");
+	if (!shader_bytecode_record_flush())
+		LogWarning("ShaderBytecodeRecord: per-frame flush FAILED\n");
 
 	uint64_t system_tick_count = GetSystemTicks();
 

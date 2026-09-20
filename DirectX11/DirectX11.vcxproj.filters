@@ -19,6 +19,7 @@
     <ClCompile Include="HookedContext.cpp" />
     <ClCompile Include="HookedDevice.cpp" />
     <ClCompile Include="..\D3D_Shaders\SignatureParser.cpp" />
+    <ClCompile Include="ShaderBytecodeRecord.cpp" />
     <ClCompile Include="ShaderRegex.cpp" />
     <ClCompile Include="ShaderStore.cpp" />
     <ClCompile Include="HookAddresses.c" />
@@ -58,6 +59,7 @@
     <ClInclude Include="HookedContext.h" />
     <ClInclude Include="HookedDevice.h" />
     <ClInclude Include="..\shader.h" />
+    <ClInclude Include="ShaderBytecodeRecord.h" />
     <ClInclude Include="ShaderRegex.h" />
     <ClInclude Include="ShaderStage.h" />
     <ClInclude Include="ShaderStore.h" />
