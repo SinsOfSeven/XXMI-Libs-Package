@@ -2085,6 +2085,18 @@ static void override_resource_desc(D3D11_BUFFER_DESC *desc, TextureOverride *tex
 		}
 	}
 }
+// Buffer extension from `extend_vertex_count`, summed over every extending
+// section at parse time. Unlike the absolute size override above it is
+// cumulative, so it must be applied exactly once (in process_texture_override)
+// rather than once per matching section. The non-buffer overloads are no-ops.
+static void override_buffer_extension(D3D11_BUFFER_DESC *desc, int extend_byte_width) {
+	if (extend_byte_width > 0) {
+		LogInfo("  extending buffer: %d->%d\n", desc->ByteWidth, desc->ByteWidth + extend_byte_width);
+		desc->ByteWidth += extend_byte_width;
+	}
+}
+template <typename DescType>
+static void override_buffer_extension(DescType *desc, int extend_byte_width) {}
 static void override_resource_desc(D3D11_TEXTURE1D_DESC *desc, TextureOverride *textureOverride) {}
 static void override_resource_desc(D3D11_TEXTURE2D_DESC *desc, TextureOverride *textureOverride)
 {
@@ -2114,6 +2126,10 @@ static const DescType* process_texture_override(uint32_t hash,
 		*newDesc = *origDesc;
 		ret = newDesc;
 
+		// Tracks the cumulative `extend_vertex_count` bytes of the matching
+		// sections (they all share the same summed value from parsing).
+		int extend_byte_width = 0;
+
 		// We go through each matching texture override applying any
 		// resource description and stereo mode overrides. The texture
 		// overrides with higher priorities come later in the list, so
@@ -2133,7 +2149,14 @@ static const DescType* process_texture_override(uint32_t hash,
 				continue;
 
 			override_resource_desc(newDesc, textureOverride);
+
+			if (textureOverride->override_extend_byte_width > extend_byte_width)
+				extend_byte_width = textureOverride->override_extend_byte_width;
 		}
+
+		// The extension is applied once (as a whole) after all matching
+		// sections are processed.
+		override_buffer_extension(newDesc, extend_byte_width);
 	}
 
 	return ret;

@@ -2058,15 +2058,21 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 
 		TextureOverride* textureOverride = NULL;
 		int override_byte_width = -1;
+		int override_extend_byte_width = 0;
 
 		for (unsigned i = 0; i < matches.size(); i++) {
 			textureOverride = matches[i];
 			if (textureOverride->override_byte_width > override_byte_width) {
 				override_byte_width = textureOverride->override_byte_width;
 			}
+			if (textureOverride->override_extend_byte_width > override_extend_byte_width) {
+				override_extend_byte_width = textureOverride->override_extend_byte_width;
+			}
 		}
 
-		if (override_byte_width != -1) {
+		// Extended buffers are also larger than the source resource, so they
+		// need the CopySubresourceRegion path as well.
+		if (override_byte_width != -1 || override_extend_byte_width > 0) {
 			mOrigContext1->CopySubresourceRegion(
 				pDstResource,           // pDstResource
 				0,                      // DstSubresource (0 for buffers)
