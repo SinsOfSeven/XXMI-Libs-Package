@@ -54,6 +54,9 @@ static Section CommandListSections[] = {
 	{L"ClearDepthStencilView", false},
 	{L"ClearUnorderedAccessViewUint", false},
 	{L"ClearUnorderedAccessViewFloat", false},
+	{L"OMSetRenderTargets", false},
+	{L"OMSetRenderTargetsAndUnorderedAccessViews", false},
+	{L"CopyResource", false},
 };
 
 // List all remaining sections so we can verify that every section listed in
@@ -4920,6 +4923,21 @@ void LoadConfigFile()
 	G->clear_uav_float_command_list.clear();
 	G->post_clear_uav_float_command_list.clear();
 	ParseCommandList(L"ClearUnorderedAccessViewFloat", &G->clear_uav_float_command_list, &G->post_clear_uav_float_command_list, NULL);
+
+	LogInfo("[OMSetRenderTargets]\n");
+	G->om_set_render_targets_command_list.clear();
+	G->post_om_set_render_targets_command_list.clear();
+	ParseCommandList(L"OMSetRenderTargets", &G->om_set_render_targets_command_list, &G->post_om_set_render_targets_command_list, NULL);
+
+	LogInfo("[OMSetRenderTargetsAndUnorderedAccessViews]\n");
+	G->om_set_render_targets_and_uav_command_list.clear();
+	G->post_om_set_render_targets_and_uav_command_list.clear();
+	ParseCommandList(L"OMSetRenderTargetsAndUnorderedAccessViews", &G->om_set_render_targets_and_uav_command_list, &G->post_om_set_render_targets_and_uav_command_list, NULL);
+
+	LogInfo("[CopyResource]\n");
+	G->copy_resource_command_list.clear();
+	G->post_copy_resource_command_list.clear();
+	ParseCommandList(L"CopyResource", &G->copy_resource_command_list, &G->post_copy_resource_command_list, NULL);
 
 	// Every command list is parsed now, so bind flags can be resolved
 	// through chains of custom resource references:

@@ -117,3 +117,36 @@ CommandListC = ref CommandListA ; No-op
 The circular reference creation is avoided, leaving the already-established chain intact.
 
 See [Command List Callbacks](../examples/command-list-callbacks.md) for a practical example.
+
+## CopyResource Special Section
+
+The `[CopyResource]` special section runs a command list around every `CopyResource()` and
+`CopySubresourceRegion()` call. The **pre** command list runs before the copy, while commands
+prefixed with `post ` run immediately after it:
+
+```ini
+[CopyResource]
+MyState = 1
+post MyState = 2 ; Runs after the copy, e.g. to record the freshly-written resource
+```
+
+Within these sections two pseudo-resources expose the arguments of the current copy:
+
+* `copy_dst` — the destination resource of the `CopyResource()`/`CopySubresourceRegion()` call.
+* `copy_src` — the source resource of the call.
+
+They can be read like any other resource target (e.g. `ResourceB = ref copy_dst`) or written
+(i.e. assigned) to **redirect** the actual copy, since the hook passes the local parameter
+pointers through to the command list:
+
+```ini
+[CopyResource]
+; Redirect the game's copy to write into our own resource instead:
+copy_dst = ref MyRes
+```
+
+Both handles are only meaningful while a `[CopyResource]` command list is running; using them in
+any other context resolves to `null` (and logs an error), following the same rules as `this`.
+
+Because the game's own references to those resources remain valid during the call, redirecting
+does not leak.

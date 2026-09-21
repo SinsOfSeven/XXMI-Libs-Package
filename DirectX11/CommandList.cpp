@@ -435,6 +435,8 @@ static void RunCommandListComplete(HackerDevice *mHackerDevice,
 		DrawCallInfo *call_info,
 		ID3D11Resource **resource,
 		ID3D11View *view,
+		ID3D11Resource **copy_dst_resource,
+		ID3D11Resource **copy_src_resource,
 		bool post)
 {
 	CommandListState state;
@@ -446,6 +448,8 @@ static void RunCommandListComplete(HackerDevice *mHackerDevice,
 	state.call_info = call_info;
 	state.resource = resource;
 	state.view = view;
+	state.copy_dst_resource = copy_dst_resource;
+	state.copy_src_resource = copy_src_resource;
 	state.post = post;
 
 	if (!post && !state.input_layout_overrides.empty())
@@ -466,7 +470,7 @@ void RunCommandList(HackerDevice *mHackerDevice,
 		resource = (ID3D11Resource**)call_info->indirect_buffer;
 
 	RunCommandListComplete(mHackerDevice, mHackerContext, command_list,
-		call_info, resource, NULL, post);
+		call_info, resource, NULL, NULL, NULL, post);
 }
 
 void RunResourceCommandList(HackerDevice *mHackerDevice,
@@ -476,7 +480,18 @@ void RunResourceCommandList(HackerDevice *mHackerDevice,
 		bool post)
 {
 	RunCommandListComplete(mHackerDevice, mHackerContext, command_list,
-			NULL, resource, NULL, post);
+			NULL, resource, NULL, NULL, NULL, post);
+}
+
+void RunCopyResourceCommandList(HackerDevice *mHackerDevice,
+		HackerContext *mHackerContext,
+		CommandList *command_list,
+		ID3D11Resource **src_resource,
+		ID3D11Resource **dst_resource,
+		bool post)
+{
+	RunCommandListComplete(mHackerDevice, mHackerContext, command_list,
+			NULL, NULL, NULL, dst_resource, src_resource, post);
 }
 
 void RunViewCommandList(HackerDevice *mHackerDevice,
@@ -491,7 +506,7 @@ void RunViewCommandList(HackerDevice *mHackerDevice,
 		view->GetResource(&res);
 
 	RunCommandListComplete(mHackerDevice, mHackerContext, command_list,
-			NULL, &res, view, post);
+			NULL, &res, view, NULL, NULL, post);
 
 	if (res)
 		res->Release();
@@ -3384,6 +3399,8 @@ CommandListState::CommandListState() :
 	this_target(NULL),
 	resource(NULL),
 	view(NULL),
+	copy_dst_resource(NULL),
+	copy_src_resource(NULL),
 	post(false),
 	update_params(false),
 	cursor_mask_tex(NULL),
@@ -8508,6 +8525,10 @@ IniParserResult ResourceCopyTarget::ParseTargetPipelineSlot(const wchar_t*& targ
 		{ L"%lcs-u%u%n",    5, ResourceCopyTargetType::UNORDERED_ACCESS_VIEW, false,  true, D3D11_1_UAV_SLOT_COUNT                            },
 		// vs-cb13 (length: min = 6, max = 7)
 		{ L"%lcs-cb%u%n",   6, ResourceCopyTargetType::CONSTANT_BUFFER,       false,  true, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT },
+		// Entries of legacy CopyResource()/CopySubresourceRegion() special
+		// sections. Only usable while running a [CopyResource] command list.
+		{ L"copy_dst",      8, ResourceCopyTargetType::COPY_RESOURCE_DST,      false,                                                          },
+		{ L"copy_src",      8, ResourceCopyTargetType::COPY_RESOURCE_SRC,      false,                                                          },
 		// Alternate means to assign IniParams
 		{ L"iniparams",     9, ResourceCopyTargetType::INI_PARAMS,            true,                                                           }, 
 		{ L"cursor_mask",  11, ResourceCopyTargetType::CURSOR_MASK,           true,                                                           },
@@ -9905,6 +9926,26 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 		COMMAND_LIST_LOG(state, "  \"this\"  is not valid in this context\n");
 		return NULL;
 
+	case ResourceCopyTargetType::COPY_RESOURCE_DST:
+		if (state->copy_dst_resource && *state->copy_dst_resource) {
+			*view = NULL;
+			(*state->copy_dst_resource)->AddRef();
+			return *state->copy_dst_resource;
+		}
+
+		COMMAND_LIST_LOG(state, "  \"copy_dst\"  is not valid in this context\n");
+		return NULL;
+
+	case ResourceCopyTargetType::COPY_RESOURCE_SRC:
+		if (state->copy_src_resource && *state->copy_src_resource) {
+			*view = NULL;
+			(*state->copy_src_resource)->AddRef();
+			return *state->copy_src_resource;
+		}
+
+		COMMAND_LIST_LOG(state, "  \"copy_src\"  is not valid in this context\n");
+		return NULL;
+
 	case ResourceCopyTargetType::SWAP_CHAIN:
 		{
 			HackerSwapChain *mHackerSwapChain = mHackerDevice->GetHackerSwapChain();
@@ -10199,6 +10240,28 @@ void ResourceCopyTarget::SetResource(
 		COMMAND_LIST_LOG(state, "  \"this\" target cannot be set outside of a checktextureoverride or indirect draw call context\n");
 		break;
 
+	case ResourceCopyTargetType::COPY_RESOURCE_DST:
+		if (state->copy_dst_resource) {
+			if (*state->copy_dst_resource)
+				(*state->copy_dst_resource)->Release();
+			*state->copy_dst_resource = res;
+			break;
+		}
+
+		COMMAND_LIST_LOG(state, "  \"copy_dst\" target cannot be set outside of a CopyResource command list context\n");
+		break;
+
+	case ResourceCopyTargetType::COPY_RESOURCE_SRC:
+		if (state->copy_src_resource) {
+			if (*state->copy_src_resource)
+				(*state->copy_src_resource)->Release();
+			*state->copy_src_resource = res;
+			break;
+		}
+
+		COMMAND_LIST_LOG(state, "  \"copy_src\" target cannot be set outside of a CopyResource command list context\n");
+		break;
+
 	case ResourceCopyTargetType::INI_PARAMS:
 	case ResourceCopyTargetType::SWAP_CHAIN:
 	case ResourceCopyTargetType::FAKE_SWAP_CHAIN:
@@ -10214,6 +10277,10 @@ void ResourceCopyTarget::SetResource(
 		break;
 	}
 }
+
+// Defined later in this file, used by BindFlags() for borrowed
+// CopyResource()/CopySubresourceRegion() arguments:
+static UINT get_resource_bind_flags(ID3D11Resource *resource);
 
 D3D11_BIND_FLAG ResourceCopyTarget::BindFlags(CommandListState *state, D3D11_RESOURCE_MISC_FLAG *misc_flags)
 {
@@ -10274,6 +10341,20 @@ D3D11_BIND_FLAG ResourceCopyTarget::BindFlags(CommandListState *state, D3D11_RES
 		case ResourceCopyTargetType::CPU:
 			// N/A since swap chain can't be set as a destination
 			return (D3D11_BIND_FLAG)0;
+		case ResourceCopyTargetType::COPY_RESOURCE_DST:
+		case ResourceCopyTargetType::COPY_RESOURCE_SRC:
+		{
+			// Bind flags are intrinsic to the borrowed resource, so peek at
+			// the actual CopyResource()/CopySubresourceRegion() arguments:
+			ID3D11Resource **copy_resource = (type == ResourceCopyTargetType::COPY_RESOURCE_DST)
+				? (state ? state->copy_dst_resource : NULL)
+				: (state ? state->copy_src_resource : NULL);
+			if (copy_resource && *copy_resource)
+				return (D3D11_BIND_FLAG)get_resource_bind_flags(*copy_resource);
+
+			// Not resolving (no command list running), so flags are unknown:
+			return (D3D11_BIND_FLAG)0;
+		}
 	}
 
 	// Shouldn't happen. No return value makes sense, so raise an exception

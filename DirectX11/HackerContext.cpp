@@ -2010,6 +2010,9 @@ STDMETHODIMP_(void) HackerContext::CopySubresourceRegion(THIS_
 	D3D11_BOX replaceSrcBox;
 	UINT replaceDstX = DstX;
 
+	RunCopyResourceCommandList(mHackerDevice, this, &G->copy_resource_command_list,
+		&pSrcResource, &pDstResource, false);
+
 	if (G->hunting && G->track_texture_updates != 2) { // Any hunting mode - want to catch hash contamination even while soft disabled
 		MarkResourceHashContaminated(pDstResource, DstSubresource, pSrcResource, SrcSubresource, 'S', DstX, DstY, DstZ, pSrcBox);
 	}
@@ -2031,6 +2034,9 @@ STDMETHODIMP_(void) HackerContext::CopySubresourceRegion(THIS_
 
 	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		CopySubresourceRegionCache(pSrcResource, pDstResource, DstX, pSrcBox);
+
+	RunCopyResourceCommandList(mHackerDevice, this, &G->post_copy_resource_command_list,
+		&pSrcResource, &pDstResource, true);
 }
 
 STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
@@ -2039,6 +2045,9 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 	/* [annotation] */
 	__in  ID3D11Resource *pSrcResource)
 {
+	RunCopyResourceCommandList(mHackerDevice, this, &G->copy_resource_command_list,
+		&pSrcResource, &pDstResource, false);
+
 	if (G->hunting && G->track_texture_updates != 2) { // Any hunting mode - want to catch hash contamination even while soft disabled
 		MarkResourceHashContaminated(pDstResource, 0, pSrcResource, 0, 'C', 0, 0, 0, NULL);
 	}
@@ -2077,6 +2086,9 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 			if (G->track_texture_updates == 1)
 				PropagateResourceHash(pDstResource, pSrcResource);
 
+			RunCopyResourceCommandList(mHackerDevice, this, &G->post_copy_resource_command_list,
+				&pSrcResource, &pDstResource, true);
+
 			return;
 		}
 	}
@@ -2085,6 +2097,9 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 
 	if (G->track_texture_updates == 1)
 		PropagateResourceHash(pDstResource, pSrcResource);
+
+	RunCopyResourceCommandList(mHackerDevice, this, &G->post_copy_resource_command_list,
+		&pSrcResource, &pDstResource, true);
 }
 
 STDMETHODIMP_(void) HackerContext::UpdateSubresource(THIS_
@@ -3264,6 +3279,8 @@ STDMETHODIMP_(void) HackerContext::OMSetRenderTargets(THIS_
 {
 	Profiling::State profiling_state;
 
+	RunCommandList(mHackerDevice, this, &G->om_set_render_targets_command_list, NULL, false);
+
 	if (G->hunting == HUNTING_MODE_ENABLED) {
 		EnterCriticalSectionPretty(&G->mCriticalSection);
 			mCurrentRenderTargets.clear();
@@ -3291,6 +3308,8 @@ STDMETHODIMP_(void) HackerContext::OMSetRenderTargets(THIS_
 	}
 
 	mOrigContext1->OMSetRenderTargets(NumViews, ppRenderTargetViews, pDepthStencilView);
+
+	RunCommandList(mHackerDevice, this, &G->post_om_set_render_targets_command_list, NULL, true);
 }
 
 STDMETHODIMP_(void) HackerContext::OMSetRenderTargetsAndUnorderedAccessViews(THIS_
@@ -3310,6 +3329,9 @@ STDMETHODIMP_(void) HackerContext::OMSetRenderTargetsAndUnorderedAccessViews(THI
 	__in_ecount_opt(NumUAVs)  const UINT *pUAVInitialCounts)
 {
 	Profiling::State profiling_state;
+
+	if (NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
+		RunCommandList(mHackerDevice, this, &G->om_set_render_targets_and_uav_command_list, NULL, false);
 
 	if (G->hunting == HUNTING_MODE_ENABLED) {
 		EnterCriticalSectionPretty(&G->mCriticalSection);
@@ -3345,6 +3367,9 @@ STDMETHODIMP_(void) HackerContext::OMSetRenderTargetsAndUnorderedAccessViews(THI
 
 	mOrigContext1->OMSetRenderTargetsAndUnorderedAccessViews(NumRTVs, ppRenderTargetViews, pDepthStencilView,
 		UAVStartSlot, NumUAVs, ppUnorderedAccessViews, pUAVInitialCounts);
+
+	if (NumRTVs != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL)
+		RunCommandList(mHackerDevice, this, &G->post_om_set_render_targets_and_uav_command_list, NULL, true);
 }
 
 STDMETHODIMP_(void) HackerContext::DrawAuto(THIS)

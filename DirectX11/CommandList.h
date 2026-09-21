@@ -69,6 +69,12 @@ public:
 	ResourceCopyTarget *this_target;
 	ID3D11Resource **resource;
 	ID3D11View *view;
+
+	// Source and destination resource handles of the CopyResource() or
+	// CopySubresourceRegion() invocation that triggered this command list.
+	// Only valid while running a [CopyResource] command list:
+	ID3D11Resource **copy_dst_resource;
+	ID3D11Resource **copy_src_resource;
 	std::vector<InputLayoutElementOverride*> input_layout_overrides;
 
 	// TODO: Cursor info and resources would be better off being cached
@@ -789,6 +795,11 @@ enum class ResourceCopyTargetType : uint32_t {
 	CPU                    = 0b00000000000010000000000000000000, // 0x00080000
 	VARIABLE               = 0b00000000000100000000000000000000, // 0x00100000
 
+	// CopyResource()/CopySubresourceRegion() src & dst, valid only while
+	// running a [CopyResource] command list:
+	COPY_RESOURCE_DST      = 0b00000000001000000000000000000000, // 0x00200000
+	COPY_RESOURCE_SRC      = 0b00000000010000000000000000000000, // 0x00400000
+
 	SPECIAL_RESOURCE_MASK  = 0b00000000000111111100000000000000, // 0x001FC000
 
 };
@@ -813,6 +824,8 @@ static EnumName_t<const wchar_t*, ResourceCopyTargetType> ResourceCopyTargetType
 	{L"RealSwapChain", ResourceCopyTargetType::REAL_SWAP_CHAIN},
 	{L"FakeSwapChain", ResourceCopyTargetType::FAKE_SWAP_CHAIN},
 	{L"CPU", ResourceCopyTargetType::CPU},
+	{L"CopyResourceDst", ResourceCopyTargetType::COPY_RESOURCE_DST},
+	{L"CopyResourceSrc", ResourceCopyTargetType::COPY_RESOURCE_SRC},
 
 	{NULL, ResourceCopyTargetType::INVALID} // End of list marker
 };
@@ -1872,6 +1885,10 @@ void RunResourceCommandList(HackerDevice *mHackerDevice,
 		HackerContext *mHackerContext,
 		CommandList *command_list, ID3D11Resource **resource,
 		bool post);
+void RunCopyResourceCommandList(HackerDevice *mHackerDevice,
+		HackerContext *mHackerContext,
+		CommandList *command_list, ID3D11Resource **src_resource,
+		ID3D11Resource **dst_resource, bool post);
 void RunViewCommandList(HackerDevice *mHackerDevice,
 		HackerContext *mHackerContext,
 		CommandList *command_list, ID3D11View *view,

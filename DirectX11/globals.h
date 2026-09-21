@@ -527,6 +527,12 @@ struct Globals
 	CommandList post_clear_uav_float_command_list;
 	CommandList clear_uav_uint_command_list;
 	CommandList post_clear_uav_uint_command_list;
+	CommandList om_set_render_targets_command_list;
+	CommandList post_om_set_render_targets_command_list;
+	CommandList om_set_render_targets_and_uav_command_list;
+	CommandList post_om_set_render_targets_and_uav_command_list;
+	CommandList copy_resource_command_list;
+	CommandList post_copy_resource_command_list;
 	CommandList constants_command_list;
 	CommandList post_constants_command_list;
 	bool constants_run;
