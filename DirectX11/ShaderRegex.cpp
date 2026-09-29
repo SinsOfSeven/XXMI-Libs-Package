@@ -6,6 +6,7 @@
 #include "log.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -507,6 +508,9 @@ struct ShaderRegexCacheRecord {
 	uint16_t _pad;
 };
 
+static_assert(sizeof(ShaderRegexCacheRecord) == 32,
+		"ShaderRegexCacheRecord must be 32 bytes");
+
 static bool shader_regex_cache_record_less(const ShaderRegexCacheRecord &a, const ShaderRegexCacheRecord &b)
 {
 	if (a.shader_type != b.shader_type)
@@ -531,6 +535,12 @@ static void shader_regex_cache_get_paths(wchar_t *dat_path, wchar_t *blob_path)
 // blob streamed through a small sliding window. All state here is guarded by
 // shader_regex_cache_mutex; the public load/save_meta/save_bin/flush methods
 // assume the lock is already held by their free-function wrappers.
+//
+// Note that save_meta() and save_bin() are two separate lock acquisitions with
+// the assembly of the patched bytecode running between them, so a per-frame
+// flush landing in that window can persist a PATCH record whose blob_size is
+// still 0. That is a recoverable state, not a corrupt one: load() treats a
+// zero blob_size on a patched record as a miss and the shader is re-analysed.
 class ShaderRegexCacheStore {
 public:
 	ShaderRegexCache load(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode,
@@ -545,12 +555,20 @@ public:
 	// appended to immediately):
 	bool flush();
 
+	// Safe to call without the mutex. The per-frame flush uses this to skip
+	// the lock entirely when there is nothing to write, so the render thread
+	// is not blocked behind an in-progress ensure_valid() file I/O:
+	bool is_dirty() const { return metadata_dirty.load(std::memory_order_relaxed); }
+
 private:
 	bool loaded = false;
+	std::wstring metadata_path;
 	ShaderRegexCacheHeader header;
 	std::vector<ShaderRegexCacheRecord> records;
 	std::vector<uint32_t> match_pool;
-	bool metadata_dirty = false;
+	// Atomic so is_dirty() can be read without the mutex; every mutation still
+	// happens under shader_regex_cache_mutex.
+	std::atomic<bool> metadata_dirty{ false };
 
 	// Grow-only bytecode blob, streamed through a small sliding window (see
 	// ShaderStore.h). Shared between the cache stores so the same machinery
@@ -566,17 +584,23 @@ private:
 	void reset_state();
 	void wipe_files();
 	bool create_metadata();
-	bool ensure_valid(bool create_if_missing);
+	bool ensure_valid(bool create_if_missing, ShaderRegexCacheFailureReason *reason = NULL);
 };
 
-// Serializes access to the cache state. This is required because
-// apply_shader_regex_groups() is also called from CopyToFixes() (when a user
-// marks a shader) which does not hold the global mCriticalSection, while
-// DeferredShaderReplacement() (which does hold it) can be analysing a shader
-// on another thread at the same time. Lock order must remain mCriticalSection
-// -> shader_regex_cache_mutex; never acquire it in the other direction:
+// Protects the store from the per-frame flush, which runs outside the global
+// critical section. Linking command lists separately requires mCriticalSection.
+// Lock order: mCriticalSection -> shader_regex_cache_mutex, never the reverse.
 static std::mutex shader_regex_cache_mutex;
 static ShaderRegexCacheStore shader_regex_cache_store;
+
+// load() has a single caller and one optional out-param, so funnel every
+// failure through here rather than repeating the null check at each site:
+static ShaderRegexCache shader_regex_cache_fail(ShaderRegexCacheFailureReason *reason, ShaderRegexCacheFailureReason why)
+{
+	if (reason)
+		*reason = why;
+	return ShaderRegexCache::NO_CACHE;
+}
 
 std::vector<ShaderRegexCacheRecord>::iterator ShaderRegexCacheStore::lower_bound(ShaderStage shader_type, uint64_t hash)
 {
@@ -593,8 +617,7 @@ ShaderRegexCacheRecord *ShaderRegexCacheStore::find_record(ShaderStage shader_ty
 {
 	std::vector<ShaderRegexCacheRecord>::iterator i = lower_bound(shader_type, hash);
 
-	if (i == records.end()
-	 || i->shader_type != shader_type || i->hash != hash)
+	if (i == records.end() || i->shader_type != shader_type || i->hash != hash)
 		return NULL;
 	return &*i;
 }
@@ -603,8 +626,7 @@ ShaderRegexCacheRecord *ShaderRegexCacheStore::find_or_insert_record(ShaderStage
 {
 	std::vector<ShaderRegexCacheRecord>::iterator i = lower_bound(shader_type, hash);
 
-	if (i != records.end()
-	 && i->shader_type == shader_type && i->hash == hash)
+	if (i != records.end() && i->shader_type == shader_type && i->hash == hash)
 		return &*i;
 
 	ShaderRegexCacheRecord record;
@@ -624,13 +646,9 @@ bool ShaderRegexCacheStore::flush()
 
 bool ShaderRegexCacheStore::persist_metadata()
 {
-	wchar_t dat_path[MAX_PATH];
+	const wchar_t *dat_path = metadata_path.c_str();
 	size_t size;
 	std::vector<byte> out;
-
-	metadata_dirty = false;
-
-	shader_regex_cache_get_paths(dat_path, NULL);
 
 	header.record_count = (uint32_t)records.size();
 	header.match_pool_count = (uint32_t)match_pool.size();
@@ -643,26 +661,33 @@ bool ShaderRegexCacheStore::persist_metadata()
 	size = sizeof(ShaderRegexCacheHeader)
 			+ records.size() * sizeof(ShaderRegexCacheRecord)
 			+ match_pool.size() * sizeof(uint32_t);
+	if (size > SHADER_STORE_METADATA_MAX)
+		return false;
 
 	out.resize(size);
 
+	const size_t records_offset = sizeof(ShaderRegexCacheHeader);
+	const size_t pool_offset = records_offset + records.size() * sizeof(ShaderRegexCacheRecord);
+
 	memcpy(out.data(), &header, sizeof(ShaderRegexCacheHeader));
-	memcpy(out.data() + sizeof(ShaderRegexCacheHeader),
-			records.data(),
-			records.size() * sizeof(ShaderRegexCacheRecord));
-	memcpy(out.data() + sizeof(ShaderRegexCacheHeader)
-			+ records.size() * sizeof(ShaderRegexCacheRecord),
-			match_pool.data(),
-			match_pool.size() * sizeof(uint32_t));
+	if (!records.empty())
+		memcpy(out.data() + records_offset, records.data(), records.size() * sizeof(ShaderRegexCacheRecord));
+	if (!match_pool.empty())
+		memcpy(out.data() + pool_offset, match_pool.data(), match_pool.size() * sizeof(uint32_t));
 
 	if (!shader_store_metadata_write(dat_path, out.data(), out.size())) {
 		LogWarning("ShaderRegexCache: persist_metadata write to %S FAILED (records=%u match_pool=%u size=%Iu)\n",
 				dat_path, header.record_count, header.match_pool_count, size);
 		return false;
 	}
+	metadata_dirty = false;
 	return true;
 }
 
+// Trust boundary for a file that may be truncated, corrupt or tampered with.
+// Everything is parsed and validated into locals first and only adopted once
+// every record passes, so a false return leaves this store exactly as it was -
+// the caller does not need a reset_state() to make a failed load safe.
 bool ShaderRegexCacheStore::metadata_load(const wchar_t *dat_path)
 {
 	std::vector<byte> buf;
@@ -670,60 +695,69 @@ bool ShaderRegexCacheStore::metadata_load(const wchar_t *dat_path)
 	if (!shader_store_metadata_read(dat_path, &buf))
 		return false;
 
-	bool ok = false;
+	if (buf.size() < sizeof(ShaderRegexCacheHeader))
+		return false;
 
-	if (buf.size() >= sizeof(ShaderRegexCacheHeader)) {
-		ShaderRegexCacheHeader header;
-		memcpy(&header, buf.data(), sizeof(header));
+	ShaderRegexCacheHeader file_header;
+	memcpy(&file_header, buf.data(), sizeof(file_header));
 
-		if (header.magic == SHADER_REGEX_CACHE_MAGIC
-		 && header.version == SHADER_REGEX_CACHE_VERSION) {
-			// The file must be exactly its expected size (header + fixed
-			// size records + flat match id pool) or it's not our file:
-			size_t expected = sizeof(ShaderRegexCacheHeader)
-					+ (size_t)header.record_count * sizeof(ShaderRegexCacheRecord)
-					+ (size_t)header.match_pool_count * sizeof(uint32_t);
+	if (file_header.magic != SHADER_REGEX_CACHE_MAGIC
+	 || file_header.version != SHADER_REGEX_CACHE_VERSION)
+		return false;
 
-			if (buf.size() == expected) {
-				this->header = header;
-				records.resize(header.record_count);
-				match_pool.resize(header.match_pool_count);
+	// The file must be exactly its expected size (header + fixed size records +
+	// flat match id pool) or it's not our file:
+	size_t expected = sizeof(ShaderRegexCacheHeader)
+			+ (size_t)file_header.record_count * sizeof(ShaderRegexCacheRecord)
+			+ (size_t)file_header.match_pool_count * sizeof(uint32_t);
+	if (buf.size() != expected)
+		return false;
 
-				memcpy(records.data(),
-						buf.data() + sizeof(ShaderRegexCacheHeader),
-						records.size() * sizeof(ShaderRegexCacheRecord));
-				memcpy(match_pool.data(),
-						buf.data() + sizeof(ShaderRegexCacheHeader)
-							+ records.size() * sizeof(ShaderRegexCacheRecord),
-						match_pool.size() * sizeof(uint32_t));
+	// Everything is parsed and validated into locals first, and only adopted
+	// once every record passes, so a rejected file cannot leave the store
+	// holding a mix of old and new state:
+	std::vector<ShaderRegexCacheRecord> loaded_records(file_header.record_count);
+	std::vector<uint32_t> loaded_pool(file_header.match_pool_count);
 
-				// Validate every record: the (stage, hash) sort invariant
-				// the binary search relies on, plus all the pool and blob
-				// ranges. Anything off means the file was tampered with or
-				// truncated:
-				ok = true;
-				ShaderRegexCacheRecord prev;
-				for (size_t i = 0; i < records.size() && ok; i++) {
-					ShaderRegexCacheRecord &r = records[i];
-
-					if (i && !shader_regex_cache_record_less(prev, r))
-						ok = false;
-					if (r.shader_type >= ShaderStage::COUNT)
-						ok = false;
-					if (r.match_count
-					 && (uint64_t)r.match_pool_index + r.match_count > (uint64_t)header.match_pool_count)
-						ok = false;
-					if (r.blob_size
-					 && r.blob_offset + r.blob_size > (uint64_t)header.blob_size)
-						ok = false;
-
-					prev = r;
-				}
-			}
-		}
+	if (!loaded_records.empty()) {
+		memcpy(loaded_records.data(),
+				buf.data() + sizeof(ShaderRegexCacheHeader),
+				loaded_records.size() * sizeof(ShaderRegexCacheRecord));
+	}
+	if (!loaded_pool.empty()) {
+		memcpy(loaded_pool.data(),
+				buf.data() + sizeof(ShaderRegexCacheHeader)
+					+ loaded_records.size() * sizeof(ShaderRegexCacheRecord),
+				loaded_pool.size() * sizeof(uint32_t));
 	}
 
-	return ok;
+	// Validate every record: the (stage, hash) sort invariant the binary search
+	// relies on, plus all the pool and blob ranges. Anything off means the file
+	// was tampered with or truncated:
+	ShaderRegexCacheRecord prev;
+	for (size_t i = 0; i < loaded_records.size(); i++) {
+		ShaderRegexCacheRecord &r = loaded_records[i];
+
+		if (i && !shader_regex_cache_record_less(prev, r))
+			return false;
+		if (r.shader_type >= ShaderStage::COUNT)
+			return false;
+		if (!shader_store_range_valid(r.match_pool_index, r.match_count, file_header.match_pool_count))
+			return false;
+		if (r.blob_size
+		 && (r.blob_offset % BlobStore::block_alignment()
+		 || !shader_store_range_valid(r.blob_offset, r.blob_size, file_header.blob_size)))
+			return false;
+		if (r.patched > 1 || (r.patched && !r.match_count))
+			return false;
+
+		prev = r;
+	}
+
+	this->header = file_header;
+	records.swap(loaded_records);
+	match_pool.swap(loaded_pool);
+	return true;
 }
 
 // Make sure the blob is consistent with the metadata before we trust it. The
@@ -752,8 +786,8 @@ void ShaderRegexCacheStore::wipe_files()
 
 	reset_state();
 
-	DeleteFile(dat_path);
-	DeleteFile(blob_path);
+	shader_store_delete(dat_path);
+	shader_store_delete(blob_path);
 }
 
 bool ShaderRegexCacheStore::create_metadata()
@@ -783,13 +817,18 @@ bool ShaderRegexCacheStore::create_metadata()
 // Loads the metadata into memory, or (re)creates it if create_if_missing.
 // The cache is tied to the ShaderRegex generation hash: if it doesn't match
 // the current shader_regex_hash the whole pair is discarded (and recreated
-// from scratch on the next write) so no stale cache is ever used:
-bool ShaderRegexCacheStore::ensure_valid(bool create_if_missing)
+// from scratch on the next write) so no stale cache is ever used. On failure,
+// reason (optional) distinguishes "what was on disk is not usable" from "it is
+// usable but belongs to an older generation" - the two are worth telling apart,
+// since the first can mean a truncated or damaged file.
+bool ShaderRegexCacheStore::ensure_valid(bool create_if_missing, ShaderRegexCacheFailureReason *reason)
 {
 	wchar_t dat_path[MAX_PATH], blob_path[MAX_PATH];
 
 	shader_regex_cache_get_paths(dat_path, blob_path);
-	blob.set_path(blob_path);
+	if (blob.set_path(blob_path))
+		reset_state();
+	metadata_path = dat_path;
 
 	// We may already have the cache loaded from a previous config reload. If
 	// the ShaderRegex generation changed since then it's all stale:
@@ -801,23 +840,33 @@ bool ShaderRegexCacheStore::ensure_valid(bool create_if_missing)
 
 		if (!create_if_missing) {
 			reset_state();
+			if (reason)
+				*reason = ShaderRegexCacheFailureReason::STALE_GENERATION;
 			return false;
 		}
 
 		wipe_files();
 	}
 
-	if (metadata_load(dat_path)
-	 && header.shader_regex_hash == shader_regex_hash
-	 && validate_blob()) {
+	if (!metadata_load(dat_path)) {
+		reset_state();
+		if (reason)
+			*reason = ShaderRegexCacheFailureReason::CORRUPT_METADATA;
+	} else if (header.shader_regex_hash != shader_regex_hash) {
+		reset_state();
+		if (reason)
+			*reason = ShaderRegexCacheFailureReason::STALE_GENERATION;
+	} else if (!validate_blob()) {
+		reset_state();
+		if (reason)
+			*reason = ShaderRegexCacheFailureReason::CORRUPT_METADATA;
+	} else {
 		blob.set_logical_end(header.blob_size);
 		loaded = true;
 		LogWarning("ShaderRegexCache: loaded %u records from %S (blob %Iu, generation %08x)\n",
 				(unsigned)records.size(), dat_path, (uint64_t)header.blob_size, header.shader_regex_hash);
 		return true;
 	}
-
-	reset_state();
 
 	if (!create_if_missing)
 		return false;
@@ -829,9 +878,16 @@ bool ShaderRegexCacheStore::ensure_valid(bool create_if_missing)
 	return create_metadata();
 }
 
+// Returns the cache verdict for one shader. Note this is not a pure query: as a
+// side effect it appends each matched group's ini section to tagline, and it
+// re-links the matched groups' command lists into G->mShaderOverrideMap via
+// link_command_lists_and_filter_index() so the shader draws as if its [ShaderOverride]
+// had been parsed. The MATCH verdict at the call site is just "return early",
+// so that work is not visible from there. reason (optional) receives why the
+// verdict was NO_CACHE; the analysis path is identical either way, so it is a
+// diagnostic only.
 ShaderRegexCache ShaderRegexCacheStore::load(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode, std::wstring *tagline, ShaderRegexCacheFailureReason *reason)
 {
-	ShaderRegexCache ret = ShaderRegexCache::NO_CACHE;
 	ShaderRegexGroup *group;
 	ShaderRegexCacheRecord *record;
 	ShaderStage stage;
@@ -842,37 +898,23 @@ ShaderRegexCache ShaderRegexCacheStore::load(UINT64 hash, const wchar_t *shader_
 
 	// Diagnostic option: never load from the packed cache, forcing the full
 	// deferred analysis path (useful for testing without the cache):
-	if (G->DISABLE_REGEX_CACHE) {
-		if (reason)
-			*reason = ShaderRegexCacheFailureReason::DISABLED;
-		return ret;
-	}
+	if (G->DISABLE_REGEX_CACHE)
+		return shader_regex_cache_fail(reason, ShaderRegexCacheFailureReason::DISABLED);
 
-	if (!G->SHADER_CACHE_PATH[0]) {
-		if (reason)
-			*reason = ShaderRegexCacheFailureReason::NO_CACHE_PATH;
-		return ret;
-	}
+	if (!G->SHADER_CACHE_PATH[0])
+		return shader_regex_cache_fail(reason, ShaderRegexCacheFailureReason::NO_CACHE_PATH);
 
 	stage = shader_stage_from_label(shader_type);
-	if (stage == ShaderStage::INVALID) {
-		if (reason)
-			*reason = ShaderRegexCacheFailureReason::INVALID_STAGE;
-		return ret;
-	}
+	if (stage == ShaderStage::INVALID)
+		return shader_regex_cache_fail(reason, ShaderRegexCacheFailureReason::INVALID_STAGE);
 
-	if (!ensure_valid(false)) {
-		if (reason)
-			*reason = ShaderRegexCacheFailureReason::STALE_GENERATION;
-		return ret;
-	}
+	// ensure_valid() reports the specific reason the cache was not usable:
+	if (!ensure_valid(false, reason))
+		return ShaderRegexCache::NO_CACHE;
 
 	record = find_record(stage, hash);
-	if (!record) {
-		if (reason)
-			*reason = ShaderRegexCacheFailureReason::NO_RECORD;
-		return ret;
-	}
+	if (!record)
+		return shader_regex_cache_fail(reason, ShaderRegexCacheFailureReason::NO_RECORD);
 
 	// num_matches may be 0, which means the ShaderRegex didn't match the
 	// shader, but we cache it anyway to skip processing the shader again.
@@ -882,17 +924,29 @@ ShaderRegexCache ShaderRegexCacheStore::load(UINT64 hash, const wchar_t *shader_
 	if (record->match_count == 0)
 		return ShaderRegexCache::NO_MATCH;
 
+	// Validate the entire hit before linking anything. A late failure must not
+	// leave partial command-list links or a tagline for the fallback analysis.
+	for (i = 0; i < record->match_count; i++) {
+		if (match_pool[record->match_pool_index + i] >= shader_regex_group_index.size())
+			return shader_regex_cache_fail(reason, ShaderRegexCacheFailureReason::MATCH_POOL_OOB);
+	}
+	if (record->patched) {
+		if (!record->blob_size)
+			return shader_regex_cache_fail(reason, ShaderRegexCacheFailureReason::RECORD_NO_BYTECODE);
+		bytecode->resize(record->blob_size);
+		uint32_t version;
+		if (!blob.read(record->blob_offset, record->blob_size, bytecode->data())
+		 || !shader_store_dxbc_version(bytecode->data(), bytecode->size(), &version)
+		 || shader_stage_from_dxbc_type(version >> 16) != stage)
+			return shader_regex_cache_fail(reason, ShaderRegexCacheFailureReason::BLOB_READ_FAILED);
+	}
+
 	for (i = 0; i < record->match_count; i++) {
 		// The ShaderRegex groups are sorted and since the cached hash
 		// already matched the map should be identical to when the
 		// cache was made, so we can use that to find the matching
 		// groups without having to do an expensive lookup by name:
 		uint32_t match_id = match_pool[record->match_pool_index + i];
-		if (match_id >= shader_regex_group_index.size()) {
-			if (reason)
-				*reason = ShaderRegexCacheFailureReason::MATCH_POOL_OOB;
-			return ret;
-		}
 		group = shader_regex_group_index[match_id];
 
 		LogWarning("ShaderRegexCache: %S %016I64x matches [%S]\n",
@@ -901,41 +955,59 @@ ShaderRegexCache ShaderRegexCacheStore::load(UINT64 hash, const wchar_t *shader_
 		if (record->patched && tagline)
 			tagline->append(std::wstring(L"[") + group->ini_section + std::wstring(L"]"));
 
+		// The caller holds mCriticalSection for these global command-list edits.
 		group->link_command_lists_and_filter_index(hash);
 	}
 
-	if (record->patched) {
-		// A blob_size of 0 means the metadata was saved before the bytecode
-		// was assembled (e.g. assembly failed last time around) - treat it as
-		// a cache miss and re-analyse the shader:
-		if (!record->blob_size) {
-			if (reason)
-				*reason = ShaderRegexCacheFailureReason::RECORD_NO_BYTECODE;
-			return ret;
-		}
-
-		bytecode->resize(record->blob_size);
-		if (!blob.read(record->blob_offset, record->blob_size, bytecode->data())) {
-			if (reason)
-				*reason = ShaderRegexCacheFailureReason::BLOB_READ_FAILED;
-			return ret;
-		}
-		ret = ShaderRegexCache::PATCH;
-	} else
-		ret = ShaderRegexCache::MATCH;
-
-	return ret;
+	return record->patched ? ShaderRegexCache::PATCH : ShaderRegexCache::MATCH;
 }
 
-void ShaderRegexCacheStore::save_meta(UINT64 hash, const wchar_t *shader_type, vector<uint32_t> *match_ids,
-		bool patched, std::string *asm_text, std::wstring *tagline)
+// Writes (or removes) the fixed-format "<hash>-<type>_regex.txt" export. This is
+// a separate concern from the packed cache, so it lives outside save_meta: an
+// early return in the cache bookkeeping must never be able to skip the export.
+static void shader_regex_cache_export_fixed(UINT64 hash, const wchar_t *shader_type,
+		bool patched, const std::string *asm_text, const std::wstring *tagline)
 {
 	wchar_t path[MAX_PATH];
 	FILE *f = NULL;
 	size_t suffix;
 
+	suffix = swprintf_s(path, MAX_PATH, L"%ls\\%016llx-%ls_regex.", G->SHADER_CACHE_PATH, hash, shader_type);
+	wcscpy_s(path+suffix, MAX_PATH-suffix, L"txt");
+
+	if (!patched) {
+		if (DeleteFile(path))
+			LogInfo("  Removed stale ShaderRegex assembly file %S\n", path);
+		return;
+	}
+
+	wfopen_ensuring_access(&f, path, L"wb");
+	if (!f) {
+		LogInfo("  Error storing ShaderRegex assembly to %S\n", path);
+		return;
+	}
+
+	fprintf_s(f, "%S\n", tagline->c_str());
+	fwrite(asm_text->c_str(), 1, asm_text->size(), f);
+
+	fclose(f);
+	LogInfo("  Storing ShaderRegex assembly to %S\n", path);
+}
+
+// Two independent concerns, in two phases. The cache bookkeeping below commits
+// the record in memory only - the disk write is deferred to flush() so a first
+// analysis does not trigger a full metadata rewrite. The fixed-format export is
+// a separate pre-existing concern, run from its own helper so no early return in
+// the cache block can skip it.
+void ShaderRegexCacheStore::save_meta(UINT64 hash, const wchar_t *shader_type, vector<uint32_t> *match_ids,
+		bool patched, std::string *asm_text, std::wstring *tagline)
+{
 	if (!G->SHADER_CACHE_PATH[0] || (!G->CACHE_SHADERS && !G->EXPORT_FIXED))
 		return;
+
+	// Export is independent of cache I/O failures.
+	if (G->EXPORT_FIXED)
+		shader_regex_cache_export_fixed(hash, shader_type, patched, asm_text, tagline);
 
 	if (G->CACHE_SHADERS && !G->DISABLE_REGEX_CACHE) {
 		ShaderRegexCacheRecord *record;
@@ -950,6 +1022,12 @@ void ShaderRegexCacheStore::save_meta(UINT64 hash, const wchar_t *shader_type, v
 			return;
 		}
 
+		// Bound the serialised metadata before growing either vector. The extra
+		// record is a conservative allowance when this is an update.
+		uint64_t required = sizeof(header) + (uint64_t)(records.size() + 1) * sizeof(ShaderRegexCacheRecord)
+				+ ((uint64_t)match_pool.size() + match_ids->size()) * sizeof(uint32_t);
+		if (required > SHADER_STORE_METADATA_MAX)
+			return;
 		record = find_or_insert_record(stage, hash);
 		if (!record) {
 			LogWarning("ShaderRegexCache: save_meta %S %016I64x failed to insert record\n", shader_type, hash);
@@ -967,38 +1045,26 @@ void ShaderRegexCacheStore::save_meta(UINT64 hash, const wchar_t *shader_type, v
 		// blob_size of a PATCH record that never had its bytecode written) is
 		// enough to stop the stale blob block from ever being loaded.
 		record->patched = patched;
-		record->match_pool_index = (uint32_t)match_pool.size();
-		record->match_count = (uint32_t)match_ids->size();
-		match_pool.insert(match_pool.end(),
-				match_ids->begin(), match_ids->end());
 
-		LogWarning("ShaderRegexCache: save_meta %S %016I64x record updated (matches=%u pool=%u patched=%d)\n",
+		// Same-generation re-analysis normally produces the same count: reuse
+		// that slice rather than accumulating copies on every retry. New records
+		// and changed-count repairs append; old files may already contain holes.
+		if (record->match_count == match_ids->size()) {
+			if (!match_ids->empty())
+				std::copy(match_ids->begin(), match_ids->end(),
+						match_pool.begin() + record->match_pool_index);
+		} else {
+			record->match_pool_index = (uint32_t)match_pool.size();
+			record->match_count = (uint32_t)match_ids->size();
+			match_pool.insert(match_pool.end(), match_ids->begin(), match_ids->end());
+		}
+
+		LogWarning("ShaderRegexCache: save_meta %S %016I64x record updated (matches=%u pool_total=%u patched=%d)\n",
 				shader_type, hash, (unsigned)record->match_count, (unsigned)match_pool.size(), (int)patched);
 
 		// Defer the disk write until the per-frame flush so we don't block
 		// the render thread with a full metadata rewrite on every shader:
 		metadata_dirty = true;
-	}
-
-	if (G->EXPORT_FIXED) {
-		suffix = swprintf_s(path, MAX_PATH, L"%ls\\%016llx-%ls_regex.", G->SHADER_CACHE_PATH, hash, shader_type);
-		wcscpy_s(path+suffix, MAX_PATH-suffix, L"txt");
-		if (patched) {
-			wfopen_ensuring_access(&f, path, L"wb");
-			if (!f) {
-				LogInfo("  Error storing ShaderRegex assembly to %S\n", path);
-				return;
-			}
-
-			fprintf_s(f, "%S\n", tagline->c_str());
-			fwrite(asm_text->c_str(), 1, asm_text->size(), f);
-
-			fclose(f);
-			LogInfo("  Storing ShaderRegex assembly to %S\n", path);
-		} else {
-			if (DeleteFile(path))
-				LogInfo("  Removed stale ShaderRegex assembly file %S\n", path);
-		}
 	}
 }
 
@@ -1009,7 +1075,7 @@ void ShaderRegexCacheStore::save_bin(UINT64 hash, const wchar_t *shader_type, ve
 
 	if (!G->SHADER_CACHE_PATH[0] || !G->CACHE_SHADERS || G->DISABLE_REGEX_CACHE)
 		return;
-	if (!bytecode || bytecode->empty())
+	if (!bytecode || bytecode->empty() || bytecode->size() > UINT32_MAX)
 		return;
 
 	stage = shader_stage_from_label(shader_type);
@@ -1035,6 +1101,16 @@ void ShaderRegexCacheStore::save_bin(UINT64 hash, const wchar_t *shader_type, ve
 		if (blob.read(record->blob_offset, record->blob_size, existing.data())
 		 && existing == *bytecode)
 			return;
+	}
+
+	// Validate before appending: load() refuses anything this rejects, so a bad
+	// assemble would strand a dead block and cost a re-analysis every session.
+	uint32_t dxbc_version;
+	if (!shader_store_dxbc_version(bytecode->data(), bytecode->size(), &dxbc_version)
+	 || shader_stage_from_dxbc_type(dxbc_version >> 16) != stage) {
+		LogWarning("ShaderRegexCache: save_bin %S %016I64x skipped - assembled output is not valid %S bytecode\n",
+				shader_type, hash, shader_type);
+		return;
 	}
 
 	uint64_t blob_offset;
@@ -1079,6 +1155,14 @@ void save_shader_regex_cache_bin(UINT64 hash, const wchar_t *shader_type, vector
 
 bool shader_regex_cache_flush()
 {
+	// is_dirty() is checked before taking the mutex, not after: a flush with
+	// nothing queued is the overwhelmingly common case, and taking the cache
+	// lock here would block the render thread behind whichever analysis is
+	// currently inside ensure_valid() doing file I/O. The store's own flush()
+	// re-checks metadata_dirty under the lock, so this is only an early-out.
+	if (!shader_regex_cache_store.is_dirty())
+		return true;
+
 	std::lock_guard<std::mutex> lock(shader_regex_cache_mutex);
 	return shader_regex_cache_store.flush();
 }
@@ -1138,7 +1222,7 @@ bool get_shader_model_from_bytecode(const void* data, size_t size, std::string* 
 
 		// Map the DXBC version token's type field to the stage table. Unknown
 		// types fall back to the table's "xx" row, matching the old default:
-		const char *prefix = shader_stage_info_at(shader_stage_from_dxil_type(type)).model_prefix;
+		const char *prefix = shader_stage_info_at(shader_stage_from_dxbc_type(type)).model_prefix;
 
 		char buf[16];
 		snprintf(buf, sizeof(buf), "%s_%u_%u", prefix, major, minor);
@@ -1193,7 +1277,7 @@ void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::
 	}
 }
 
-bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline)
+bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline, bool cache_result)
 {
 	ShaderRegexGroups::iterator i;
 	ShaderRegexGroup *group;
@@ -1235,7 +1319,11 @@ bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type
 	// way we can skip checking for a match next time when we know there
 	// won't be any. This only saves the metadata - the caller will use
 	// save_shader_regex_cache_bin to save the assembled binary.
-	save_shader_regex_cache_meta(hash, shader_type, &match_ids, patched, asm_text, tagline);
+	//
+	// Skipped for the hunting/dump path, which works from its own
+	// disassembly of the original shader rather than this analysis.
+	if (cache_result)
+		save_shader_regex_cache_meta(hash, shader_type, &match_ids, patched, asm_text, tagline);
 
 	return patched;
 }

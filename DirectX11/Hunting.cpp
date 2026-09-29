@@ -1027,7 +1027,13 @@ static void CopyToFixes(UINT64 hash, HackerDevice *device)
 				wstring tagline(L"// MANUALLY DUMPED ");
 				bool patched = false;
 				try {
-					patched = apply_shader_regex_groups(&asmText, iter.second.shaderType.c_str(), &iter.second.shaderModel, hash, &tagline);
+					// cache_result false: this path re-disassembles the original
+					// shader itself, so its match set is not the analysis the
+					// cache is meant to hold. Saving here would overwrite a good
+					// entry - and, because the match count can differ, orphan the
+					// old slice in the match pool. The deferred analysis path in
+					// HackerContext is the cache's only writer.
+					patched = apply_shader_regex_groups(&asmText, iter.second.shaderType.c_str(), &iter.second.shaderModel, hash, &tagline, false);
 				} catch (...) {
 					LogOverlay(LOG_WARNING, "Exception while patching shader\n");
 				}
