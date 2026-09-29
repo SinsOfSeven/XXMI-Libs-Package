@@ -15,6 +15,7 @@
 #include "Override.h"
 #include "Hunting.h"
 #include "ShaderRegex.h"
+#include "ShaderStore.h"
 #include "ShaderBytecodeRecord.h"
 #include "cursor.h"
 #include <chrono>
@@ -4449,6 +4450,13 @@ void BuildTextureOverrideDrawMaps()
 	}
 }
 
+uint64_t BlobStore::read_ahead_size()
+{
+	// Keep configuration access here so the storage code has no Globals dependency.
+	int raw = G->SHADER_CACHE_READ_AHEAD.load(std::memory_order_relaxed);
+	return clamp_read_ahead(raw > 0 ? (uint64_t)raw : 0);
+}
+
 void LoadConfigFile()
 {
 	wchar_t iniFile[MAX_PATH], logFilename[MAX_PATH];
@@ -4710,6 +4718,21 @@ void LoadConfigFile()
 
 	G->CACHE_SHADERS = GetIniBool(L"Rendering", L"cache_shaders", false, NULL);
 	G->DISABLE_REGEX_CACHE = GetIniBool(L"Rendering", L"disable_shader_regex_cache", false, NULL);
+	// Read-ahead target for the packed cache blob, in bytes. 0 disables it.
+	// Clamped here as well as at the read site so a bad value is rejected once,
+	// rather than silently on every read. Note std::max is unusable here:
+	// windows.h defines max as a macro, which cannot take a call as an argument.
+	int read_ahead = GetIniInt(L"Rendering", L"shader_cache_read_ahead",
+			(int)BlobStore::read_ahead_default(), NULL);
+	if (read_ahead < 0) {
+		LogWarning("shader_cache_read_ahead: %d is negative, using 0 (read-ahead off)\n", read_ahead);
+		read_ahead = 0;
+	}
+	uint64_t clamped = BlobStore::clamp_read_ahead((uint64_t)read_ahead);
+	if (clamped != (uint64_t)read_ahead)
+		LogWarning("shader_cache_read_ahead: %d exceeds the %Iu byte maximum, clamping\n",
+				read_ahead, BlobStore::read_ahead_max());
+	G->SHADER_CACHE_READ_AHEAD = (int)clamped;
 	G->SCISSOR_DISABLE = GetIniBool(L"Rendering", L"rasterizer_disable_scissor", false, NULL);
 	G->track_texture_updates = GetIniBoolOrInt(L"Rendering", L"track_texture_updates", 0, NULL);
 

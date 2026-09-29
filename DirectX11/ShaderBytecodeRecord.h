@@ -6,9 +6,15 @@
 #include "ShaderStage.h"
 #include "ShaderStore.h"
 
-// Fixed-size on-disk record for original (unpatched) shader bytecode
-// preserved in ShaderBytecodeRecord.blob. Records are keyed (stage, hash)
-// and kept sorted for binary search:
+// The ledger is deliberately NOT generation-keyed, unlike ShaderRegexCache: the
+// bytecode it holds is the game's original, unpatched shader, which is valid
+// regardless of which [ShaderRegex] sections are configured. So editing a regex
+// rebuilds ShaderRegexCache but leaves this pair alone, and the two files do not
+// need to be kept in sync or wiped together.
+//
+// On-disk format below. Records are keyed (stage, hash) and kept sorted for
+// binary search. The 32-byte stride packs two entries per 64 bytes. This is
+// compact storage, not a guarantee of cache-line alignment of std::vector.
 struct ShaderBytecodeRecordEntry {
 	uint64_t hash;
 	uint64_t blob_offset;
@@ -29,8 +35,13 @@ struct ShaderBytecodeRecordFileHeader {
 	uint32_t record_count;
 	uint32_t flags;
 	uint64_t blob_size;
-	uint64_t next_epoch;    // bumped on each save; last_seen stores epoch at write time
+	// Bumped on each save; entry::last_seen stores the epoch at write time.
+	// save() rebases the live epochs before this counter would wrap.
+	uint32_t next_epoch;
+	uint32_t reserved; // formerly padding / high half of the original uint64 epoch
 };
+
+static_assert(sizeof(ShaderBytecodeRecordFileHeader) == 32, "Ledger header layout changed");
 
 // Public API — all functions are thread-safe (internal mutex):
 void shader_bytecode_record_save(UINT64 hash, const wchar_t *shader_type,

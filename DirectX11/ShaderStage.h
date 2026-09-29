@@ -23,7 +23,7 @@ struct ShaderStageInfo {
 	const wchar_t *label;        // "vs", "hs", ... (cache types, overrides)
 	wchar_t letter;              // 'v', 'h', ... ([CustomShader] compile keys)
 	const char *model_prefix;    // shader model string prefix (ps_5_0, ...)
-	uint32_t dxil_type;          // DXBC SHEX/SHDR version token type field
+	uint32_t dxbc_type;          // DXBC SHEX/SHDR version token type field
 };
 
 // Order must match ShaderStage exactly so the table can be indexed by stage.
@@ -68,10 +68,12 @@ inline ShaderStage shader_stage_from_letter(wchar_t letter)
 	return ShaderStage::INVALID;
 }
 
-inline ShaderStage shader_stage_from_dxil_type(uint32_t type)
+// Named for the DXBC version token's type subfield, not DXIL: this is read out of
+// the shader bytecode itself by get_shader_model_from_bytecode().
+inline ShaderStage shader_stage_from_dxbc_type(uint32_t type)
 {
 	for (size_t i = 0; i < static_cast<size_t>(ShaderStage::COUNT); i++)
-		if (shader_stage_info[i].dxil_type == type)
+		if (shader_stage_info[i].dxbc_type == type)
 			return static_cast<ShaderStage>(i);
 	return ShaderStage::INVALID;
 }

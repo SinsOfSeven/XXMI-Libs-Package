@@ -203,8 +203,13 @@ void HackerSwapChain::RunFrameActions()
 	if (LogFile) fflush(LogFile);
 
 	// Same idea for the ShaderRegex cache metadata: new records are written
-	// every time a shader is first analysed, so instead of blocking the draw
-	// thread with a full metadata rewrite per shader we defer to here:
+	// every time a shader is first analysed, so instead of rewriting the
+	// metadata per shader we defer to here. The dirty check happens inside
+	// shader_regex_cache_flush() before it takes the cache mutex, so the common
+	// no-op frame does no work. The frame that does flush, or that races a
+	// shader's first analysis, can still wait on that mutex - ensure_valid()
+	// holds it across a metadata read/write. That is the same order of cost as
+	// the log fflush above.
 	if (!shader_regex_cache_flush())
 		LogWarning("ShaderRegexCache: per-frame flush FAILED\n");
 	if (!shader_bytecode_record_flush())

@@ -557,7 +557,13 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 	// (until config reload) regardless of whether we patch it or not:
 	orig_info->deferred_replacement_processed = true;
 
-	switch (load_shader_regex_cache(hash, shader_type, &patched_bytecode, &tagline)) {
+	// cache_reason is only used on the NO_CACHE path, where it distinguishes an
+	// ordinary cold miss from a disabled cache or a metadata file we could not
+	// use - all of which fall through to the same full analysis below, but only
+	// one of which is worth noticing.
+	ShaderRegexCacheFailureReason cache_reason = ShaderRegexCacheFailureReason::NONE;
+
+	switch (load_shader_regex_cache(hash, shader_type, &patched_bytecode, &tagline, &cache_reason)) {
 	case ShaderRegexCache::NO_MATCH:
 		goto out_drop;
 	case ShaderRegexCache::MATCH:
@@ -567,7 +573,8 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 		LogInfo("Loaded %S %016I64x bytecode from ShaderRegex cache\n", shader_type, hash);
 		break;
 	case ShaderRegexCache::NO_CACHE:
-		LogInfo("Performing deferred shader analysis on %S %016I64x...\n", shader_type, hash);
+		LogInfo("Performing deferred shader analysis on %S %016I64x (cache miss, reason %d)...\n",
+				shader_type, hash, (int)cache_reason);
 
 		// Preserve the original bytecode in the ShaderBytecodeRecord ledger so
 		// the async pre-deferred analysis workers and frame analysis can get
@@ -575,11 +582,8 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 		// ledger deduplicates by (stage, hash), so a re-analysis after a
 		// generation change just bumps the record's access count:
 		{
-			const void *raw = orig_info->byteCode->GetBufferPointer();
-			size_t raw_size = orig_info->byteCode->GetBufferSize();
-			std::vector<uint8_t> original_bytecode(
-					static_cast<const uint8_t *>(raw),
-					static_cast<const uint8_t *>(raw) + raw_size);
+			const uint8_t *raw = (const uint8_t *)orig_info->byteCode->GetBufferPointer();
+			std::vector<uint8_t> original_bytecode(raw, raw + orig_info->byteCode->GetBufferSize());
 			shader_bytecode_record_save(hash, shader_type, &original_bytecode);
 		}
 
@@ -664,6 +668,10 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 		save_shader_regex_cache_bin(hash, shader_type, &patched_bytecode);
 	}
 
+	// Both surviving paths converge here deliberately: the cache-PATCH case
+	// breaks out of the switch above with patched_bytecode already filled from
+	// the blob, and the analysis case falls through the end of the block. So the
+	// bind logic below is shared rather than duplicated per verdict.
 	hr = (mOrigDevice1->*CreateShader)(patched_bytecode.data(), patched_bytecode.size(),
 			orig_info->linkage, &patched_shader);
 	CleanupShaderMaps(patched_shader);

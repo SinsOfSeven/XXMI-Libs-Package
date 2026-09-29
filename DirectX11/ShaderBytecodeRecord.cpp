@@ -1,6 +1,7 @@
 #include "ShaderBytecodeRecord.h"
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 
 #include "globals.h"
@@ -12,8 +13,13 @@
 // Cap on the number of records kept. The ledger is generation-independent so
 // it grows across ShaderRegex reloads; when the cap is exceeded the oldest
 // (by last_seen) records are pruned. Their blob blocks stay behind in the
-// grow-only blob file (dead blocks are skipped over by record offsets):
-static constexpr size_t SHADER_BYTECODE_RECORD_MAX = 16384;
+// grow-only blob file (dead blocks are skipped over by record offsets).
+// The macro indirection lets the test harness shrink the cap so the prune
+// path is exercisable without a 16k-record ledger on disk:
+#ifndef SHADER_BYTECODE_RECORD_MAX_RECORDS
+#define SHADER_BYTECODE_RECORD_MAX_RECORDS 16384
+#endif
+static constexpr size_t SHADER_BYTECODE_RECORD_MAX = SHADER_BYTECODE_RECORD_MAX_RECORDS;
 
 // Similar in spirit to ShaderRegexCacheStore, but this ledger stores the
 // *original* (unpatched) bytecode, keyed only by (stage, hash). It survives
@@ -29,11 +35,18 @@ public:
 	// Called from the per-frame seam, exactly like the ShaderRegex cache:
 	bool flush();
 
+	// Safe to call without the mutex. The per-frame flush uses this to skip the
+	// lock entirely when there is nothing to write:
+	bool is_dirty() const { return metadata_dirty.load(std::memory_order_relaxed); }
+
 private:
 	bool loaded = false;
+	std::wstring metadata_path;
 	ShaderBytecodeRecordFileHeader header;
 	std::vector<ShaderBytecodeRecordEntry> records;
-	bool metadata_dirty = false;
+	// Atomic so is_dirty() can be read without the mutex; every mutation still
+	// happens under shader_bytecode_record_mutex.
+	std::atomic<bool> metadata_dirty{ false };
 
 	BlobStore blob;
 
@@ -89,8 +102,7 @@ ShaderBytecodeRecordEntry *ShaderBytecodeRecordStore::find_record(ShaderStage st
 {
 	std::vector<ShaderBytecodeRecordEntry>::iterator i = lower_bound(stage, hash);
 
-	if (i == records.end()
-	 || i->stage != stage || i->hash != hash)
+	if (i == records.end() || i->stage != stage || i->hash != hash)
 		return NULL;
 	return &*i;
 }
@@ -99,8 +111,7 @@ ShaderBytecodeRecordEntry *ShaderBytecodeRecordStore::find_or_insert_record(Shad
 {
 	std::vector<ShaderBytecodeRecordEntry>::iterator i = lower_bound(stage, hash);
 
-	if (i != records.end()
-	 && i->stage == stage && i->hash == hash)
+	if (i != records.end() && i->stage == stage && i->hash == hash)
 		return &*i;
 
 	ShaderBytecodeRecordEntry record;
@@ -113,12 +124,8 @@ ShaderBytecodeRecordEntry *ShaderBytecodeRecordStore::find_or_insert_record(Shad
 
 bool ShaderBytecodeRecordStore::persist_metadata()
 {
-	wchar_t dat_path[MAX_PATH];
+	const wchar_t *dat_path = metadata_path.c_str();
 	std::vector<uint8_t> out;
-
-	metadata_dirty = false;
-
-	get_paths(dat_path, NULL);
 
 	header.record_count = (uint32_t)records.size();
 
@@ -131,18 +138,23 @@ bool ShaderBytecodeRecordStore::persist_metadata()
 	out.resize(size);
 
 	memcpy(out.data(), &header, sizeof(ShaderBytecodeRecordFileHeader));
-	memcpy(out.data() + sizeof(ShaderBytecodeRecordFileHeader),
-			records.data(),
-			records.size() * sizeof(ShaderBytecodeRecordEntry));
+	if (!records.empty())
+		memcpy(out.data() + sizeof(ShaderBytecodeRecordFileHeader),
+				records.data(), records.size() * sizeof(ShaderBytecodeRecordEntry));
 
 	if (!shader_store_metadata_write(dat_path, out.data(), out.size())) {
 		LogWarning("ShaderBytecodeRecord: persist_metadata write to %S FAILED (records=%u size=%Iu)\n",
 				dat_path, header.record_count, size);
 		return false;
 	}
+	metadata_dirty = false;
 	return true;
 }
 
+// Trust boundary for a file that may be truncated, corrupt or tampered with.
+// Everything is parsed and validated into locals first and only adopted once
+// every record passes, so a false return leaves this store exactly as it was -
+// the caller does not need a reset_state() to make a failed load safe.
 bool ShaderBytecodeRecordStore::metadata_load(const wchar_t *dat_path)
 {
 	std::vector<uint8_t> buf;
@@ -150,47 +162,58 @@ bool ShaderBytecodeRecordStore::metadata_load(const wchar_t *dat_path)
 	if (!shader_store_metadata_read(dat_path, &buf))
 		return false;
 
-	bool ok = false;
+	if (buf.size() < sizeof(ShaderBytecodeRecordFileHeader))
+		return false;
 
-	if (buf.size() >= sizeof(ShaderBytecodeRecordFileHeader)) {
-		ShaderBytecodeRecordFileHeader header;
-		memcpy(&header, buf.data(), sizeof(header));
+	ShaderBytecodeRecordFileHeader file_header;
+	memcpy(&file_header, buf.data(), sizeof(file_header));
 
-		if (header.magic == SHADER_BYTECODE_RECORD_CACHE_MAGIC
-		 && header.version == SHADER_BYTECODE_RECORD_CACHE_VERSION) {
-			size_t expected = sizeof(ShaderBytecodeRecordFileHeader)
-					+ (size_t)header.record_count * sizeof(ShaderBytecodeRecordEntry);
+	if (file_header.magic != SHADER_BYTECODE_RECORD_CACHE_MAGIC
+	 || file_header.version != SHADER_BYTECODE_RECORD_CACHE_VERSION)
+		return false;
 
-			if (buf.size() == expected) {
-				this->header = header;
-				records.resize(header.record_count);
+	size_t expected = sizeof(ShaderBytecodeRecordFileHeader)
+			+ (size_t)file_header.record_count * sizeof(ShaderBytecodeRecordEntry);
+	if (buf.size() != expected)
+		return false;
 
-				memcpy(records.data(),
-						buf.data() + sizeof(ShaderBytecodeRecordFileHeader),
-						records.size() * sizeof(ShaderBytecodeRecordEntry));
-
-				// Validate every record: the (stage, hash) sort invariant the
-				// binary search relies on, plus the blob ranges:
-				ok = true;
-				ShaderBytecodeRecordEntry prev;
-				for (size_t i = 0; i < records.size() && ok; i++) {
-					ShaderBytecodeRecordEntry &r = records[i];
-
-					if (i && !record_less(prev, r))
-						ok = false;
-					if (r.stage >= ShaderStage::COUNT)
-						ok = false;
-					if (r.blob_size
-					 && r.blob_offset + r.blob_size > (uint64_t)header.blob_size)
-						ok = false;
-
-					prev = r;
-				}
-			}
-		}
+	// Everything is parsed and validated into locals first, and only adopted
+	// once every record passes, so a rejected file cannot leave the store
+	// holding a mix of old and new state:
+	std::vector<ShaderBytecodeRecordEntry> loaded(file_header.record_count);
+	if (!loaded.empty()) {
+		memcpy(loaded.data(),
+				buf.data() + sizeof(ShaderBytecodeRecordFileHeader),
+				loaded.size() * sizeof(ShaderBytecodeRecordEntry));
 	}
 
-	return ok;
+	// Validate every record: the (stage, hash) sort invariant the binary search
+	// relies on, plus the blob ranges:
+	ShaderBytecodeRecordEntry prev;
+	for (size_t i = 0; i < loaded.size(); i++) {
+		ShaderBytecodeRecordEntry &r = loaded[i];
+
+		if (i && !record_less(prev, r))
+			return false;
+		if (r.stage >= ShaderStage::COUNT)
+			return false;
+		// blob_size == 0 is tolerated: an old session that failed mid-append
+		// can leave such a record, and save() repairs it with a fresh append.
+		// Only a claimed block has to be aligned and inside the blob.
+		if (r.blob_size
+		 && (r.blob_offset % BlobStore::block_alignment()
+		 || !shader_store_range_valid(r.blob_offset, r.blob_size, file_header.blob_size)))
+			return false;
+
+		prev = r;
+	}
+
+	file_header.reserved = 0;
+	for (const auto &r : loaded)
+		file_header.next_epoch = (std::max)(file_header.next_epoch, r.last_seen);
+	this->header = file_header;
+	records.swap(loaded);
+	return true;
 }
 
 // Make sure the blob is at least as large as the metadata claims:
@@ -216,8 +239,8 @@ void ShaderBytecodeRecordStore::wipe_files()
 
 	reset_state();
 
-	DeleteFile(dat_path);
-	DeleteFile(blob_path);
+	shader_store_delete(dat_path);
+	shader_store_delete(blob_path);
 }
 
 bool ShaderBytecodeRecordStore::create_metadata()
@@ -248,7 +271,9 @@ bool ShaderBytecodeRecordStore::ensure_valid(bool create_if_missing)
 	wchar_t dat_path[MAX_PATH], blob_path[MAX_PATH];
 
 	get_paths(dat_path, blob_path);
-	blob.set_path(blob_path);
+	if (blob.set_path(blob_path))
+		reset_state();
+	metadata_path = dat_path;
 
 	if (loaded) {
 		blob.set_logical_end(header.blob_size);
@@ -281,12 +306,24 @@ bool ShaderBytecodeRecordStore::ensure_valid(bool create_if_missing)
 }
 
 // Trims to SHADER_BYTECODE_RECORD_MAX records, keeping the most recent. Runs
-// only after a metadata load (records are inserted in (stage, hash) sort order
-// but last_seen is not sorted, so this needs a full re-sort):
+// after a metadata load and whenever a save pushes the count over the cap.
+// Records are always inserted in (stage, hash) sort order but last_seen is not
+// sorted, so the trim needs a full re-sort on both counts:
 void ShaderBytecodeRecordStore::prune_oldest()
 {
 	if (records.size() <= SHADER_BYTECODE_RECORD_MAX)
 		return;
+	// Normal steady-state insertion exceeds the cap by one. Preserve key order
+	// with one linear scan/erase instead of sorting the entire ledger twice.
+	if (records.size() == SHADER_BYTECODE_RECORD_MAX + 1) {
+		auto oldest = std::min_element(records.begin(), records.end(),
+				[](const ShaderBytecodeRecordEntry &a, const ShaderBytecodeRecordEntry &b) {
+					return a.last_seen < b.last_seen;
+				});
+		records.erase(oldest);
+		metadata_dirty = true;
+		return;
+	}
 
 	std::sort(records.begin(), records.end(),
 			[](const ShaderBytecodeRecordEntry &a, const ShaderBytecodeRecordEntry &b) {
@@ -320,7 +357,10 @@ bool ShaderBytecodeRecordStore::load(UINT64 hash, const wchar_t *shader_type, st
 		return false;
 
 	bytecode->resize(record->blob_size);
-	return blob.read(record->blob_offset, record->blob_size, bytecode->data());
+	uint32_t version;
+	return blob.read(record->blob_offset, record->blob_size, bytecode->data())
+			&& shader_store_dxbc_version(bytecode->data(), bytecode->size(), &version)
+			&& shader_stage_from_dxbc_type(version >> 16) == stage;
 }
 
 void ShaderBytecodeRecordStore::save(UINT64 hash, const wchar_t *shader_type, const std::vector<uint8_t> *bytecode)
@@ -329,7 +369,7 @@ void ShaderBytecodeRecordStore::save(UINT64 hash, const wchar_t *shader_type, co
 
 	if (!G->SHADER_CACHE_PATH[0] || !G->CACHE_SHADERS)
 		return;
-	if (!bytecode || bytecode->empty())
+	if (!bytecode || bytecode->empty() || bytecode->size() > UINT32_MAX)
 		return;
 
 	ShaderStage stage = shader_stage_from_label(shader_type);
@@ -341,19 +381,36 @@ void ShaderBytecodeRecordStore::save(UINT64 hash, const wchar_t *shader_type, co
 		return;
 	}
 
+	// Keep recency ordering meaningful even for long-lived ledgers at rollover.
+	if (header.next_epoch == UINT32_MAX) {
+		std::sort(records.begin(), records.end(),
+				[](const ShaderBytecodeRecordEntry &a, const ShaderBytecodeRecordEntry &b) {
+					return a.last_seen < b.last_seen;
+				});
+		header.next_epoch = 0;
+		for (auto &r : records)
+			r.last_seen = ++header.next_epoch;
+		std::sort(records.begin(), records.end(), record_less);
+	}
 	record = find_record(stage, hash);
-	if (record) {
+	if (record && record->blob_size) {
 		// Already in the ledger - just refresh its recency and access count
 		// (the bytecode is identical so no new blob block is needed):
-		record->last_seen = (uint32_t)++header.next_epoch;
-		record->access_count++;
+		record->last_seen = ++header.next_epoch;
+		if (record->access_count != UINT32_MAX)
+			record->access_count++;
 		metadata_dirty = true;
 		return;
 	}
 
-	record = find_or_insert_record(stage, hash);
-	if (!record) {
-		LogWarning("ShaderBytecodeRecord: save %S %016I64x failed to insert record\n", shader_type, hash);
+	// Validate before appending: load() refuses anything this rejects, so
+	// persisting it would only strand a dead block. An unledgered shader just
+	// costs a re-analysis next session; a poisoned ledger costs every session.
+	uint32_t dxbc_version;
+	if (!shader_store_dxbc_version(bytecode->data(), bytecode->size(), &dxbc_version)
+	 || shader_stage_from_dxbc_type(dxbc_version >> 16) != stage) {
+		LogWarning("ShaderBytecodeRecord: save %S %016I64x skipped - not valid %S bytecode\n",
+				shader_type, hash, shader_type);
 		return;
 	}
 
@@ -364,12 +421,21 @@ void ShaderBytecodeRecordStore::save(UINT64 hash, const wchar_t *shader_type, co
 		return;
 	}
 
+	// Publish only after the append succeeds; failed writes must be retryable.
+	record = find_or_insert_record(stage, hash);
 	record->blob_offset = blob_offset;
 	record->blob_size = (uint32_t)bytecode->size();
-	record->last_seen = (uint32_t)++header.next_epoch;
+	record->last_seen = ++header.next_epoch;
 	record->access_count = 1;
 	record->flags = 0;
 	header.blob_size = blob.logical_end();
+
+	// Must come after the last use of record: prune_oldest() re-sorts the
+	// vector, which invalidates the pointer. The cap is also enforced after a
+	// load, but a single long session can cross it without ever reloading, and
+	// this ledger is generation-independent so nothing else would trim it.
+	if (records.size() > SHADER_BYTECODE_RECORD_MAX)
+		prune_oldest();
 
 	LogWarning("ShaderBytecodeRecord: saved %S %016I64x at blob offset %Iu (%u bytes)\n",
 			shader_type, hash, (uint64_t)blob_offset, (unsigned)bytecode->size());
@@ -401,6 +467,11 @@ bool shader_bytecode_record_load(UINT64 hash, const wchar_t *shader_type, std::v
 
 bool shader_bytecode_record_flush()
 {
+	// Checked before taking the mutex, as in shader_regex_cache_flush(): a
+	// no-op flush should never block behind another thread's file I/O.
+	if (!shader_bytecode_record_store.is_dirty())
+		return true;
+
 	std::lock_guard<std::mutex> lock(shader_bytecode_record_mutex);
 	return shader_bytecode_record_store.flush();
 }
