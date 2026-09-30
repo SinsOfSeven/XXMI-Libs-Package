@@ -1363,6 +1363,29 @@ void CheckTextureOverrideCommand::run(CommandListState *state)
 	if (target.IsRange() && !target.ResolveRange(state, &first, &count))
 		return;
 
+	// A known shader declaration set can prove that an SRV slot cannot be used
+	// by the draw. Unknown shaders and unknown declarations retain normal matching.
+	UINT64 shader_hash = 0;
+	bool have_shader_hash = false;
+	if (target.type == ResourceCopyTargetType::SHADER_RESOURCE) {
+		ID3D11DeviceChild *shader = nullptr;
+		switch (target.shader_type) {
+		case L'v': shader = state->mHackerContext->mCurrentVertexShaderHandle; break;
+		case L'h': shader = state->mHackerContext->mCurrentHullShaderHandle; break;
+		case L'd': shader = state->mHackerContext->mCurrentDomainShaderHandle; break;
+		case L'g': shader = state->mHackerContext->mCurrentGeometryShaderHandle; break;
+		case L'p': shader = state->mHackerContext->mCurrentPixelShaderHandle; break;
+		case L'c': shader = state->mHackerContext->mCurrentComputeShaderHandle; break;
+		}
+		if (shader) {
+			ShaderMap::iterator shader_it = lookup_shader_hash(shader);
+			if (shader_it != G->mShaders.end()) {
+				shader_hash = shader_it->second;
+				have_shader_hash = true;
+			}
+		}
+	}
+
 	saved_this = state->this_target;
 	for (unsigned s = 0; s < count; s++) {
 		TextureOverrideMatches matches;
@@ -1388,6 +1411,15 @@ void CheckTextureOverrideCommand::run(CommandListState *state)
 		}
 
 		state->this_target = &checked;
+		if (have_shader_hash) {
+			unsigned slot = checked.ResolveSlot(state);
+			uint32_t declared = 1;
+			if (slot < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT &&
+				shader_bytecode_record_query_declaration(shader_hash,
+					shader_stage_from_letter(target.shader_type), ShaderDeclarationField::SRV_DECLARES,
+					slot, &declared) && !declared)
+				continue;
+		}
 		checked.FindTextureOverrides(state, NULL, &matches);
 
 		if (run_pre_and_post_together) {

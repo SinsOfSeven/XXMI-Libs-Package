@@ -253,7 +253,7 @@ bool ShaderBytecodeRecordStore::persist_metadata()
 	// metadata never references bytecode that isn't on disk yet:
 	size_t size = sizeof(ShaderBytecodeRecordFileHeader)
 			+ records.size() * sizeof(ShaderBytecodeRecordEntry) + declaration_arena.size();
-	if (size > SHADER_STORE_METADATA_MAX)
+	if (size > BLOB_STORE_METADATA_MAX)
 		return false;
 
 	out.resize(size);
@@ -343,7 +343,7 @@ bool ShaderBytecodeRecordStore::metadata_load(const wchar_t *dat_path)
 				return false;
 			size_t decl_size = declaration_block_size(loaded_arena.data() + decl_offset,
 					loaded_arena.size() - decl_offset);
-			if (!decl_size || !shader_store_range_valid(decl_offset, decl_size, loaded_arena.size()) ||
+			if (!decl_size || !blob_store_range_valid(decl_offset, decl_size, loaded_arena.size()) ||
 					!declaration_block_valid(loaded_arena.data() + decl_offset, decl_size))
 				return false;
 		}
@@ -545,7 +545,7 @@ bool ShaderBytecodeRecordStore::save_declarations(UINT64 hash, const wchar_t *sh
 	if (declaration_arena.size() > UINT32_MAX - aligned_size ||
 			declaration_arena.size() / 4 >= (1u << 24) ||
 			sizeof(header) + (records.size() + 1) * sizeof(ShaderBytecodeRecordEntry)
-				+ declaration_arena.size() + aligned_size > SHADER_STORE_METADATA_MAX)
+				+ declaration_arena.size() + aligned_size > BLOB_STORE_METADATA_MAX)
 		return false;
 	record = find_or_insert_record(stage, hash);
 	if (header.next_epoch == UINT32_MAX) {
