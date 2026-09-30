@@ -949,6 +949,7 @@ void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource)
 	D3D11_TEXTURE2D_DESC desc;
 	ResourceHandleInfo *info;
 	std::vector<uint32_t> crcs;
+	std::string fa_lods;
 	UINT count, mip_levels, subresource;
 	bool want_lod, want_data_hash;
 	Profiling::State profiling_state;
@@ -1027,22 +1028,52 @@ void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource)
 	// The resource may have been released and another created at the same address
 	// while the readback was in flight, so the handle info is looked up again
 	// rather than reusing the pointer taken above.
+	bool hashed = false;
+	uint32_t hash = 0;
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 		info = GetResourceHandleInfo(resource);
 		if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+			hash = info->hash;
 			if (want_lod) {
 				info->lod_hashes = std::move(crcs);
 				// Bumped so the cached lod_hash candidate list is rebuilt from the
 				// subresources just hashed.
 				info->lod_candidate_generation++;
+
+				// Frame analysis is the main way these hashes are collected, so
+				// record what this update produced, in the same compact
+				// `hash@subresource` form the slot listings use. Zero entries are
+				// skipped: an empty texture would otherwise list one entry per mip
+				// per array slice.
+				if (G->analyse_frame) {
+					char entry[40];
+					bool first = true;
+					for (UINT i = 0; i < info->lod_hashes.size(); i++) {
+						if (!info->lod_hashes[i])
+							continue;
+						_snprintf_s(entry, sizeof(entry), sizeof(entry),
+								first ? "lod=[%08x@%u" : " %08x@%u", info->lod_hashes[i], i);
+						fa_lods += entry;
+						first = false;
+					}
+					if (!first)
+						fa_lods += "]";
+				}
 			}
 			info->texture_hashes_dirty = false;
+			hashed = true;
 		}
 	LeaveCriticalSection(&G->mCriticalSection);
 
+	// Frame analysis is where these hashes are collected from, so log what this
+	// update produced. Emitted only when there is actually a hash to report.
+	if (hashed && !fa_lods.empty())
+		context->FrameAnalysisLog("3DMigoto EnsureTexture2DHashes hash=%08x %s\n",
+				hash, (char *)fa_lods.c_str());
+
 out_profile:
 	if (Profiling::mode == Profiling::Mode::SUMMARY)
-		Profiling::end(&profiling_state, &Profiling::hash_tracking_overhead);
+		Profiling::end(&profiling_state, &Profiling::lod_hash_tracking_overhead);
 }
 
 // Must be called with the critical section held to protect mResources against

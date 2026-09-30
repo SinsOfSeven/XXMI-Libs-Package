@@ -1583,7 +1583,7 @@ void HackerContext::TrackAndDivertUnmap(ID3D11Resource *pResource, UINT Subresou
 	// Subresource is not tested here even though the old CPU path only handled
 	// subresource 0: a write to any mip can change what a lod_hash section should
 	// match, and the on-demand path rehashes the whole resource regardless.
-	if (map_info->mapped_writable && (G->track_lod_hashes || G->track_texture_updates == 1))
+	if (map_info->mapped_writable && (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1))
 		MarkTexture2DHashesDirty(pResource);
 
 	if (map_info->orig_pData) {
@@ -2255,6 +2255,18 @@ STDMETHODIMP_(void) HackerContext::GenerateMips(THIS_
 	__in  ID3D11ShaderResourceView *pShaderResourceView)
 {
 	 mOrigContext1->GenerateMips(pShaderResourceView);
+
+	// GenerateMips regenerates the mips on the GPU, which the CPU never sees, so
+	// there is no CPU-side contents to hash here. Flag the view's resource stale
+	// so the on-demand path reads the generated mips back when a mod checks it.
+	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1) {
+		ID3D11Resource *resource = NULL;
+		pShaderResourceView->GetResource(&resource);
+		if (resource) {
+			MarkTexture2DHashesDirty(resource);
+			resource->Release();
+		}
+	}
 }
 
 STDMETHODIMP_(void) HackerContext::SetResourceMinLOD(THIS_
@@ -2288,6 +2300,11 @@ STDMETHODIMP_(void) HackerContext::ResolveSubresource(THIS_
 {
 	 mOrigContext1->ResolveSubresource(pDstResource, DstSubresource, pSrcResource, SrcSubresource,
 		Format);
+
+	// The resolve wrote the destination subresource on the GPU, so flag its
+	// tracked hashes stale for the on-demand path to pick up.
+	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1)
+		MarkTexture2DHashesDirty(pDstResource);
 }
 
 STDMETHODIMP_(void) HackerContext::ExecuteCommandList(THIS_
@@ -3510,6 +3527,12 @@ void STDMETHODCALLTYPE HackerContext::CopySubresourceRegion1(
 		ClearResourceRegionHashCache(pDstResource);
 
 	mOrigContext1->CopySubresourceRegion1(pDstResource, DstSubresource, DstX, DstY, DstZ, pSrcResource, SrcSubresource, pSrcBox, CopyFlags);
+
+	// Same as CopySubresourceRegion: the destination's contents may have changed,
+	// so flag its tracked hashes stale. The "1" variants are separate entry points
+	// the game can call directly, so they need the same treatment.
+	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1)
+		MarkTexture2DHashesDirty(pDstResource);
 }
 
 void STDMETHODCALLTYPE HackerContext::UpdateSubresource1(
@@ -3533,7 +3556,10 @@ void STDMETHODCALLTYPE HackerContext::UpdateSubresource1(
 
 	mOrigContext1->UpdateSubresource1(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch, CopyFlags);
 
-	// TODO: Track resource hash updates
+	// Same as UpdateSubresource: flag the tracked hashes stale rather than
+	// hashing here, so the readback only happens for slots a mod checks.
+	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1)
+		MarkTexture2DHashesDirty(pDstResource);
 }
 
 

@@ -255,31 +255,29 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *re
 					populated++;
 			}
 
-			fprintf(frame_analysis_log, " mip_levels=%u populated=%zu", max(resource_info.desc2D.MipLevels, 1u), populated);
+			fprintf(frame_analysis_log, " mip_levels=%u populated=%zu",
+					max(resource_info.desc2D.MipLevels, 1u), populated);
+			if (max(resource_info.desc2D.ArraySize, 1u) > 1)
+				fprintf(frame_analysis_log, " array=%u", resource_info.desc2D.ArraySize);
 
-			// A zero entry means that subresource has no known contents yet -
-			// either not streamed in, or not yet read back by the on-demand path.
-			// Those print as a dash rather than being omitted, because the slot
-			// existing is the point: it is what shows the gap between the
-			// advertised mip count and the data actually present.
+			// List the subresources that actually have contents, as
+			// `hash@subresource`. Zero entries are left out rather than printed as
+			// dashes: an empty or partially streamed texture would otherwise add one
+			// entry per mip per array slice and bury the rest of the dump.
+			// Dimensions are left out as well - they follow from the base size and
+			// mip, and made these lines far longer than the other dumps.
 			//
 			// The subresource index counts array slices as well as mips, so the
-			// mip within a slice is index % MipLevels. Dimensions are computed the
-			// same way the hashing path does, so a capture shows the resolution of
-			// each mip that is really there.
-			UINT mip_levels = max(resource_info.desc2D.MipLevels, 1);
+			// mip within a slice is index % MipLevels.
 			bool first = true;
 			for (UINT i = 0; i < lod_hashes.size(); i++) {
-				UINT mip = i % mip_levels;
-				UINT width = max(resource_info.desc2D.Width >> mip, 1);
-				UINT height = max(resource_info.desc2D.Height >> mip, 1);
-
-				if (lod_hashes[i])
-					fprintf(frame_analysis_log, "%s lod_mip%u=%08x(%ux%u)", first ? "" : ",", i, lod_hashes[i], width, height);
-				else
-					fprintf(frame_analysis_log, "%s lod_mip%u=-(%ux%u)", first ? "" : ",", i, width, height);
+				if (!lod_hashes[i])
+					continue;
+				fprintf(frame_analysis_log, first ? " lod=[%08x@%u" : " %08x@%u", lod_hashes[i], i);
 				first = false;
 			}
+			if (!first)
+				fprintf(frame_analysis_log, "]");
 		}
 
 		info = &G->mResourceInfo.at(orig_hash);
