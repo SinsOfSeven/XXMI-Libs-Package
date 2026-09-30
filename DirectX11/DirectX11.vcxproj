@@ -59,6 +59,7 @@
     <ClCompile Include="HookedContext.cpp" />
     <ClCompile Include="HookedDevice.cpp" />
     <ClCompile Include="HookedDXGI.cpp" />
+    <ClCompile Include="ImageHash.cpp" />
     <ClCompile Include="Hunting.cpp" />
     <ClCompile Include="IniHandler.cpp" />
     <ClCompile Include="Input.cpp" />
@@ -93,6 +94,8 @@
     <ClInclude Include="HookedContext.h" />
     <ClInclude Include="HookedDevice.h" />
     <ClInclude Include="HookedDXGI.h" />
+    <ClInclude Include="ImageHash.h" />
+    <ClInclude Include="bcdec.h" />
     <ClInclude Include="Hunting.h" />
     <ClInclude Include="IniHandler.h" />
     <ClInclude Include="Input.h" />
