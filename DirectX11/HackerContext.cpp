@@ -1780,7 +1780,13 @@ STDMETHODIMP_(void) HackerContext::SOSetTargets(THIS_
 	// counts. Any call (bind or unbind) bumps the generation so the counts
 	// reset against the new bindings; the mod's own stream output copies go
 	// through the raw original context, so they don't reach this hook.
-	m_so_targets_bound = NumBuffers > 0;
+	m_so_targets_bound = false;
+	for (UINT i = 0; ppSOTargets && i < NumBuffers; ++i) {
+		if (ppSOTargets[i]) {
+			m_so_targets_bound = true;
+			break;
+		}
+	}
 	m_so_binding_generation++;
 }
 

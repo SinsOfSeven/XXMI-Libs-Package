@@ -1679,7 +1679,6 @@ void DrawCommand::run(CommandListState *state)
 			state->previous_draw_type = (UINT)DrawCall::DrawIndexed;
 			if (stream_output_bound) {
 				state->accumulated.index_count += (UINT)eargs[0];
-				state->accumulated.instance_count += (UINT)eargs[1];
 			}
 			break;
 		case DrawCommandType::DRAW_INDEXED_INSTANCED:
