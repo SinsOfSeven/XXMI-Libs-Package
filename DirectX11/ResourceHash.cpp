@@ -911,8 +911,10 @@ void MarkTexture2DHashesDirty(ID3D11Resource *resource)
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 
 	info = GetResourceHandleInfo(resource);
-	if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+	if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
 		info->texture_hashes_dirty = true;
+		info->texture_hashes_generation++;
+	}
 
 	LeaveCriticalSection(&G->mCriticalSection);
 }
@@ -922,11 +924,12 @@ void MarkTexture2DHashesDirty(ID3D11Resource *resource)
 // Used for resources that can never be read back - multisampled, or a format D3D
 // will not create as a staging resource. Leaving the flag set would make every
 // subsequent check retry the same impossible work, and log about it each time.
-static void ClearTexture2DHashesDirty(ID3D11Resource *resource)
+static void ClearTexture2DHashesDirty(ID3D11Resource *resource, uint64_t generation)
 {
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 		ResourceHandleInfo *info = GetResourceHandleInfo(resource);
-		if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+		if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D &&
+				info->texture_hashes_generation == generation)
 			info->texture_hashes_dirty = false;
 	LeaveCriticalSection(&G->mCriticalSection);
 }
@@ -947,11 +950,14 @@ void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource)
 	ID3D11DeviceContext1 *orig_context;
 	ID3D11Texture2D *staging;
 	D3D11_TEXTURE2D_DESC desc;
+	D3D11_TEXTURE2D_DESC hash_desc;
 	ResourceHandleInfo *info;
 	std::vector<uint32_t> crcs;
 	std::string fa_lods;
 	UINT count, mip_levels, subresource;
+	uint32_t data_hash = 0;
 	bool want_lod, want_data_hash;
+	uint64_t generation;
 	Profiling::State profiling_state;
 
 	if (!context || !resource)
@@ -972,6 +978,9 @@ void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource)
 		}
 		want_lod = G->track_lod_hashes || G->track_lod_hash_updates;
 		want_data_hash = G->track_texture_updates == 1;
+		generation = info->texture_hashes_generation;
+		if (want_data_hash)
+			hash_desc = info->desc2D;
 
 		((ID3D11Texture2D *)resource)->GetDesc(&desc);
 	LeaveCriticalSection(&G->mCriticalSection);
@@ -983,7 +992,7 @@ void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource)
 	// hash is the honest answer; a wrong one would be worse. Cleared so the
 	// doomed attempt is not repeated on every check.
 	if (desc.SampleDesc.Count > 1) {
-		ClearTexture2DHashesDirty(resource);
+		ClearTexture2DHashesDirty(resource, generation);
 		return;
 	}
 
@@ -991,16 +1000,17 @@ void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource)
 	// create as a staging resource at all.
 	staging = context->GetStagingTexture2D(desc);
 	if (!staging) {
-		ClearTexture2DHashesDirty(resource);
+		ClearTexture2DHashesDirty(resource, generation);
 		return;
 	}
 
 	orig_context = context->GetPassThroughOrigContext1();
 	count = Texture2DSubresourceCount(&desc);
 	mip_levels = max(desc.MipLevels, 1);
-	crcs.assign(count, 0);
+	if (want_lod)
+		crcs.assign(count, 0);
 
-	for (subresource = 0; subresource < count; subresource++) {
+	for (subresource = 0; subresource < (want_lod ? count : 1); subresource++) {
 		D3D11_MAPPED_SUBRESOURCE mapped;
 		HRESULT hr;
 
@@ -1019,8 +1029,13 @@ void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource)
 			crcs[subresource] = CalcSubresourceHash(&desc, subresource % mip_levels,
 					mapped.pData, mapped.RowPitch);
 
-		if (subresource == 0 && want_data_hash)
-			UpdateResourceHashFromCPU(resource, mapped.pData, mapped.RowPitch, mapped.DepthPitch);
+		if (subresource == 0 && want_data_hash) {
+			D3D11_SUBRESOURCE_DATA initial_data = {};
+			initial_data.pSysMem = mapped.pData;
+			initial_data.SysMemPitch = mapped.RowPitch;
+			initial_data.SysMemSlicePitch = mapped.DepthPitch;
+			data_hash = CalcTexture2DDataHash(&hash_desc, &initial_data);
+		}
 
 		orig_context->Unmap(staging, subresource);
 	}
@@ -1032,7 +1047,12 @@ void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource)
 	uint32_t hash = 0;
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 		info = GetResourceHandleInfo(resource);
-		if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+		if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D &&
+				info->texture_hashes_generation == generation) {
+			if (want_data_hash) {
+				info->data_hash = data_hash;
+				info->hash = CalcTexture2DDescHash(data_hash, &info->desc2D);
+			}
 			hash = info->hash;
 			if (want_lod) {
 				info->lod_hashes = std::move(crcs);

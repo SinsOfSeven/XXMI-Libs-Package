@@ -453,6 +453,7 @@ struct ResourceHandleInfo
 	// flag, and the readback that actually costs something happens at
 	// checktextureoverride, and only while this is set.
 	bool texture_hashes_dirty = false;
+	uint64_t texture_hashes_generation = 0;
 
 	// CPU-side copy of the resource data captured via hooks or staging buffer.
 	// Used to compute hashes for arbitrary regions without re-mapping
