@@ -22,6 +22,7 @@
 //#include "ResourceHash.h"
 //#include "Override.h"
 #include "ShaderRegex.h"
+#include "ShaderBytecodeValidation.h"
 #include "ShaderBytecodeRecord.h"
 #include "FrameAnalysis.h"
 #include "profiling.h"
@@ -666,13 +667,19 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 			goto out_drop;
 		}
 
-		save_shader_regex_cache_bin(hash, shader_type, &patched_bytecode);
 	}
 
 	// Both surviving paths converge here deliberately: the cache-PATCH case
 	// breaks out of the switch above with patched_bytecode already filled from
 	// the blob, and the analysis case falls through the end of the block. So the
 	// bind logic below is shared rather than duplicated per verdict.
+	// Cache hits were checked by load_shader_regex_cache; only the newly
+	// assembled candidate needs a check here.
+	if (patch_regex && !shader_bytecode_dxbc_instructions(patched_bytecode.data(), patched_bytecode.size())) {
+		LogOverlayW(LOG_WARNING, L"Rejecting malformed ShaderRegex bytecode for %016I64x-%ls\n",
+				hash, shader_type);
+		goto out_drop;
+	}
 	hr = (mOrigDevice1->*CreateShader)(patched_bytecode.data(), patched_bytecode.size(),
 			orig_info->linkage, &patched_shader);
 	CleanupShaderMaps(patched_shader);
@@ -681,6 +688,9 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 			hash, shader_type, hr);
 		goto out_drop;
 	}
+	// Publish first-use bytecode only after the device accepts it.
+	if (patch_regex)
+		save_shader_regex_cache_bin(hash, shader_type, &patched_bytecode);
 
 	// Update replacement map so we don't have to repeat this process.
 	// Not updating the bytecode in the replaced shader map - we do that

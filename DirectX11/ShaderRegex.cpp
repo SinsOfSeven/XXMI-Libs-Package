@@ -974,7 +974,8 @@ ShaderRegexCache ShaderRegexCacheStore::load(UINT64 hash, const wchar_t *shader_
 		uint32_t version;
 		if (!blob.read(record->blob_offset, record->blob_size, bytecode->data())
 		 || !shader_bytecode_dxbc_version(bytecode->data(), bytecode->size(), &version)
-		 || shader_stage_from_dxbc_type(version >> 16) != stage)
+		 || shader_stage_from_dxbc_type(version >> 16) != stage
+		 || !shader_bytecode_dxbc_instructions(bytecode->data(), bytecode->size()))
 			return shader_regex_cache_fail(reason, ShaderRegexCacheFailureReason::BLOB_READ_FAILED);
 	}
 
@@ -1144,9 +1145,10 @@ void ShaderRegexCacheStore::save_bin(UINT64 hash, const wchar_t *shader_type, ve
 	// assemble would strand a dead block and cost a re-analysis every session.
 	uint32_t dxbc_version;
 	if (!shader_bytecode_dxbc_version(bytecode->data(), bytecode->size(), &dxbc_version)
-	 || shader_stage_from_dxbc_type(dxbc_version >> 16) != stage) {
+	 || shader_stage_from_dxbc_type(dxbc_version >> 16) != stage
+	 || !shader_bytecode_dxbc_instructions(bytecode->data(), bytecode->size())) {
 		LogOverlayW(LOG_WARNING,
-			L"ShaderRegex output for %016I64x-%ls failed bytecode container or stage validation; cache entry skipped\n",
+			L"ShaderRegex output for %016I64x-%ls failed bytecode validation; cache entry skipped\n",
 			hash, shader_type);
 		return;
 	}
