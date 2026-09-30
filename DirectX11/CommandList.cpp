@@ -4,6 +4,7 @@
 
 #include "CommandList.h"
 #include "ShaderStage.h"
+#include "ShaderBytecodeRecord.h"
 
 #include <DDSTextureLoader.h>
 #include <algorithm>
@@ -3276,16 +3277,48 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 
 	//LogDebug("ShaderTarget Member Evaluation hash=%016I64x\n", shader_it->second);
 
-	auto it = G->mShaderBindingsCache.find(shader_it->second);
-	if (it == G->mShaderBindingsCache.end()) {
-		assert(false);
-		return 0.0;  // Safety check, should never happen;
+	const auto mode = shader_target.evaluation_mode;
+	float raw_slot = mode == ShaderTargetEvaluationMode::DCL_CB_MASK
+		? 0.0f : shader_target.member_args[0].GetValue(state);
+	if (!(raw_slot >= 0.0f) || raw_slot != floorf(raw_slot))
+		return -1.0f;
+	const bool cb_field = mode == ShaderTargetEvaluationMode::DCL_CB_MASK ||
+		mode == ShaderTargetEvaluationMode::DCL_CB_TYPE || mode == ShaderTargetEvaluationMode::DCL_CB_SIZE;
+	if (raw_slot >= (cb_field ? D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT
+			: D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT))
+		return -1.0f;
+	UINT slot_id = (UINT)raw_slot;
+	ShaderDeclarationField field;
+	switch (mode) {
+	case ShaderTargetEvaluationMode::DCL_CB_MASK: field = ShaderDeclarationField::CB_MASK; break;
+	case ShaderTargetEvaluationMode::DCL_CB_TYPE: field = ShaderDeclarationField::CB_TYPE; break;
+	case ShaderTargetEvaluationMode::DCL_CB_SIZE: field = ShaderDeclarationField::CB_SIZE; break;
+	case ShaderTargetEvaluationMode::DCL_SRV_DECLARES: field = ShaderDeclarationField::SRV_DECLARES; break;
+	case ShaderTargetEvaluationMode::DCL_SRV_TYPE: field = ShaderDeclarationField::SRV_TYPE; break;
+	case ShaderTargetEvaluationMode::DCL_SRV_STRIDE: field = ShaderDeclarationField::SRV_STRIDE; break;
+	case ShaderTargetEvaluationMode::DCL_SRV_DIMENSION: field = ShaderDeclarationField::SRV_DIMENSION; break;
+	default: return 0.0f;
 	}
+	uint32_t value;
+	if (shader_bytecode_record_query_declaration(shader_it->second,
+			shader_stage_from_letter(shader_target.shader_type), field, slot_id, &value))
+		return value == UINT32_MAX ? -1.0f : (float)value;
 
-	UINT slot_id = (UINT)shader_target.member_args[0].GetValue(state);
+	CriticalSectionGuard(&G->mShaderBindingsLock);
+	auto it = G->mShaderBindingsCache.find(shader_it->second);
+	if (it == G->mShaderBindingsCache.end())
+		return -1.0f;
 
-	switch (shader_target.evaluation_mode)
+	switch (mode)
 	{
+	case ShaderTargetEvaluationMode::DCL_CB_MASK:
+	{
+		uint32_t mask = 0;
+		for (unsigned i = 0; i < it->second.constant_buffers.size(); ++i)
+			if (it->second.constant_buffers[i].type != ShaderConstantBufferType::NONE)
+				mask |= 1u << i;
+		return (float)mask;
+	}
 	case ShaderTargetEvaluationMode::DCL_CB_TYPE:
 	{
 		ShaderConstantBuffer& cb = it->second.constant_buffers[slot_id];
@@ -3307,6 +3340,8 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 
 		return (float)t.type;
 	}
+	case ShaderTargetEvaluationMode::DCL_SRV_DECLARES:
+		return it->second.resources[slot_id].type != ShaderResourceType::NONE ? 1.0f : 0.0f;
 	case ShaderTargetEvaluationMode::DCL_SRV_STRIDE:
 	{
 		ShaderResource& t = it->second.resources[slot_id];
@@ -8099,7 +8134,9 @@ IniParserResult ShaderTarget::ParseTargetMember(
 		{ L"->cb_size",         9, ShaderTargetEvaluationMode::DCL_CB_SIZE, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },
-		{ L"->srv_mask",       10, ShaderTargetEvaluationMode::DCL_SRV_MASK },
+		{ L"->srv_declares",   14, ShaderTargetEvaluationMode::DCL_SRV_DECLARES, {{
+			MemberArg::Type::Unsigned, // Slot ID
+		}} },
 		{ L"->srv_type",       10, ShaderTargetEvaluationMode::DCL_SRV_TYPE, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },

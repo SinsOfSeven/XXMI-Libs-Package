@@ -15,6 +15,7 @@
 #include "HackerDevice.h"
 #include "HookedDevice.h"
 #include "FrameAnalysis.h"
+#include "ShaderBytecodeRecord.h"
 
 #include <D3Dcompiler.h>
 #include <codecvt>
@@ -2557,8 +2558,13 @@ fnv:
 	return hash;
 }
 
-static void CacheShaderBindings(uint64_t hash, const void* pShaderBytecode, SIZE_T BytecodeLength)
+static void CacheShaderBindings(uint64_t hash, const wchar_t *shader_type,
+		const void* pShaderBytecode, SIZE_T BytecodeLength)
 {
+	// On a warm ledger this is an indexed hit and does not parse bytecode.
+	// With disk caching disabled, retain the legacy in-memory fallback.
+	if (shader_bytecode_record_save_declarations(hash, shader_type, pShaderBytecode, BytecodeLength))
+		return;
 	{
 		CriticalSectionGuard(&G->mShaderBindingsLock);
 
@@ -2590,14 +2596,7 @@ static void CacheShaderBindings(uint64_t hash, const void* pShaderBytecode, SIZE
 			return;
 		}
 
-		if (!parsed)
-		{
-			LogInfo("  Failed to parse %016I64x shader bindings from bytecode.\n", hash);
-		}
-		else
-		{
-			LogDebug("  Cached %016I64x shader bindings (parsed from bytecode).\n", hash);
-		}
+		LogDebug("  Cached %016I64x shader bindings (parsed from bytecode).\n", hash);
 	}
 }
 
@@ -2635,7 +2634,7 @@ STDMETHODIMP HackerDevice::CreateShader(THIS_
 	//auto start = std::chrono::steady_clock::now();
 	//for (int i = 0; i < iterations; ++i)
 	//{
-	CacheShaderBindings(hash, pShaderBytecode, BytecodeLength);
+	CacheShaderBindings(hash, shaderType, pShaderBytecode, BytecodeLength);
 	//}
 	//auto end = std::chrono::steady_clock::now();
 	//const double total_ms = std::chrono::duration<double, std::milli>(end - start).count();
