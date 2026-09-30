@@ -293,6 +293,7 @@ struct TextureOverride {
 	std::vector<int> iterations;
 	bool expand_region_copy;
 	bool deny_cpu_read;
+	bool track_mips;
 	float filter_index;
 	float backup_filter_index;
 
@@ -316,6 +317,7 @@ struct TextureOverride {
 		override_num_elements(-1),
 		expand_region_copy(false),
 		deny_cpu_read(false),
+		track_mips(false),
 		filter_index(FLT_MAX),
 		has_match_priority(false),
 		priority(0)
@@ -494,6 +496,10 @@ struct Globals
 	DataCacheBindFlags cache_resource_data = (DataCacheBindFlags)0;
 	bool track_lod_hashes;
 	bool track_lod_hash_updates;
+	// Enabled automatically when an INI expression uses ->miphash.
+	bool track_mip_hashes = false;
+	std::atomic<bool> has_track_mips_overrides {false};
+	uint64_t mip_hash_deferred_generation = 0;
 	bool track_implicit_index_buffers;
 	bool allow_buffer_resize;
 	int texture_hash_version;
@@ -656,6 +662,9 @@ struct Globals
 	///////////////////////////////////////////////////////////////////////
 	CRITICAL_SECTION mResourcesLock;
 	ResourceMap mResources;
+	// Unwrapped custom textures are absent from mResources. Their owned mip
+	// caches are still invalidated by the same D3D write hooks.
+	std::unordered_multimap<ID3D11Resource *, ResourceHandleInfo *> mCustomMipHashCaches;
 
 	std::unordered_map<ID3D11Asynchronous*, AsyncQueryType> mQueryTypes;
 

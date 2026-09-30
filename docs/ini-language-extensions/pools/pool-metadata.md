@@ -25,7 +25,7 @@ endif
 
 This condition is `true` when both pool resources reference the same underlying buffer.
 
-See [Resource Metadata → Resource Identity (`@`)](../resources/resource-metadata.md/#resource-identity) for details about resource identities.
+See [Resource Metadata → Resource Identity (`@`)](../resources/resource-metadata.md#resource-identity) for details about resource identities.
 
 ## Pool Identity (`@`)
 
@@ -35,7 +35,7 @@ When applied directly to a pool, `@` returns an identity value for the pool obje
 $pool_id = @PoolFoo
 ```
 
-A pool that is a [proxy](pool-operations.md/#pool-reference) of another pool returns the identity of the pool it resolves to.
+A pool that is a [proxy](pool-operations.md#pool-reference) of another pool returns the identity of the pool it resolves to.
 
 ## Pool Attributes (`->`)
 
@@ -60,7 +60,7 @@ $index = PoolFooFIFO[$uid]->Index
 
 This is useful when a script needs to determine which pool element was selected by FIFO assignment.
 
-For a UID that is not assigned to any element, `Index` returns `-1` and does not allocate an element (see [Lookup Misses](declaration.md/#lookup-misses)):
+For a UID that is not assigned to any element, `Index` returns `-1` and does not allocate an element (see [Lookup Misses](declaration.md#lookup-misses)):
 
 ```ini
 if PoolFooFIFO[$uid]->Index == -1
@@ -73,11 +73,11 @@ endif
 | Value      | Meaning                                              |
 | ---------- | ---------------------------------------------------- |
 | `0` and up | Index of the pool element                            |
-| `-1`       | Pool [template resource](resources.md/#template-resource), e.g. for an unassigned FIFO UID |
+| `-1`       | Pool [template resource](resources.md#template-resource), e.g. for an unassigned FIFO UID |
 | `-2`       | Regular `[Resource]` (`ResourceFoo->Index`)          |
 | `-3`       | Not a custom resource (`vs-t0->Index`)               |
 
-See [Pool Index Types → FIFO](indexing.md/#fifo-indexing) for more details about FIFO indexing.
+See [Pool Index Types → FIFO](indexing.md#fifo-indexing) for more details about FIFO indexing.
 
 ### `Size`
 
@@ -89,6 +89,6 @@ For `[PoolFoo]` with `pool_size = 4`:
 $pool_size = PoolFoo->Size ; Returns 4.
 ```
 
-For a [proxy](pool-operations.md/#pool-reference) pool, the size of the pool it resolves to is returned.
+For a [proxy](pool-operations.md#pool-reference) pool, the size of the pool it resolves to is returned.
 
-> `PoolFoo[$index]->Size` is the [resource size](../resources/resource-metadata.md/#size) of the element, not the pool size.
+> `PoolFoo[$index]->Size` is the [resource size](../resources/resource-metadata.md#size) of the element, not the pool size.

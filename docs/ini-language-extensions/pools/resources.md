@@ -36,7 +36,7 @@ PoolFoo[$index + 1]
 
 ### Reading an Unknown FIFO UID
 
-When unassigned UID is requested for [FIFO-indexed](indexing.md/#fifo-indexing) pool, **template resource** is returned.
+When unassigned UID is requested for [FIFO-indexed](indexing.md#fifo-indexing) pool, **template resource** is returned.
 
 ## Pool Resource Assignment
 
@@ -51,7 +51,7 @@ PoolFoo[$index] = copy ResourceText ; Full Copy (expensive).
 
 > `ref` performs a reference copy by pointing to the underlying D3D resource, while `copy` creates a full copy of the underlying resource.
 
-> Assignment to a pool resource resets the variable of the same element unless `pool_element_type_switch_reset = 0` is set. See [Element Types](declaration.md/#element-types).
+> Assignment to a pool resource resets the variable of the same element unless `pool_element_type_switch_reset = 0` is set. See [Element Types](declaration.md#element-types).
 
 ## Pool Resource Ranges
 
@@ -64,9 +64,9 @@ ps-t[0:3] = ref PoolFoo[0:3]
 PoolFoo[0:3] = ref ps-t[0:3]
 ```
 
-Pool range bounds are always element indices that wrap like [Ring](indexing.md/#ring-indexing) indices, whatever the pool's index type. On a `fifo` or `spatial` pool a range addresses the physical elements directly and bypasses key lookup, like the [full range operations](variables.md/#full-range-operations) do.
+Pool range bounds are always element indices that wrap like [Ring](indexing.md#ring-indexing) indices, whatever the pool's index type. On a `fifo` or `spatial` pool a range addresses the physical elements directly and bypasses key lookup, like the [full range operations](variables.md#full-range-operations) do.
 
-See [Slot Indexing → Slot Ranges](../resources/slot-indexing.md/#slot-ranges) for details.
+See [Slot Indexing → Slot Ranges](../resources/slot-indexing.md#slot-ranges) for details.
 
 ### Full Range Reset
 
@@ -76,7 +76,7 @@ See [Slot Indexing → Slot Ranges](../resources/slot-indexing.md/#slot-ranges) 
 PoolFoo[*] = null ; Set every pool resource to null.
 ```
 
-Variables of the pool are left untouched, use `$PoolFoo[*] = null` to reset those. See [Variables → Full Range Operations](variables.md/#full-range-operations).
+Variables of the pool are left untouched, use `$PoolFoo[*] = null` to reset those. See [Variables → Full Range Operations](variables.md#full-range-operations).
 
 ## Pool Resource Usage
 

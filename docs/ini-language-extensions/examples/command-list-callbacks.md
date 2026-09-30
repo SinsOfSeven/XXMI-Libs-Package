@@ -1,6 +1,6 @@
 # Command List Callbacks
 
-Suppose a shared "library" INI handles a character's draw calls, and other mods want to run their own commands at a specific point of that handling, without editing the library. [Proxy command lists](../command-lists/README.md/#proxy-command-lists) let the library expose an empty callback that other namespaces redirect to their own command lists.
+Suppose a shared "library" INI handles a character's draw calls, and other mods want to run their own commands at a specific point of that handling, without editing the library. [Proxy command lists](../command-lists/README.md#proxy-command-lists) let the library expose an empty callback that other namespaces redirect to their own command lists.
 
 ## Library
 
@@ -74,4 +74,4 @@ run = CommandList\Outfit\OutfitHandler ; Keep the outfit handler.
 ps-t4 = ref ResourceEffectTexture
 ```
 
-Assignments that would form a loop, such as the outfit handler referencing the effects handler back, are ignored, so a broken chain never recurses forever. See [Circular References](../command-lists/README.md/#circular-references).
+Assignments that would form a loop, such as the outfit handler referencing the effects handler back, are ignored, so a broken chain never recurses forever. See [Circular References](../command-lists/README.md#circular-references).

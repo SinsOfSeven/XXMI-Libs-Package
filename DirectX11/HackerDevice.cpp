@@ -2179,6 +2179,8 @@ STDMETHODIMP HackerDevice::CreateBuffer(THIS_
 			handle_info->hash = hash;
 			handle_info->orig_hash = hash;
 			handle_info->data_hash = data_hash;
+			handle_info->initial_data_supplied = pInitialData != NULL;
+			handle_info->track_mips = false;
 
 			// XXX: This is only used for hash tracking, which we
 			// don't enable for buffers for performance reasons:
@@ -2234,6 +2236,8 @@ STDMETHODIMP HackerDevice::CreateTexture1D(THIS_
 			handle_info->hash = hash;
 			handle_info->orig_hash = hash;
 			handle_info->data_hash = data_hash;
+			handle_info->initial_data_supplied = pInitialData != NULL;
+			handle_info->track_mips = false;
 
 			// TODO: For hash tracking if we ever need it for Texture1Ds:
 			// if (pDesc)
@@ -2329,6 +2333,7 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 	if (pDesc)
 		hash = CalcTexture2DDescHash(hash, pDesc);
 	LogDebug("  InitialData = %p, hash = %08lx\n", pInitialData, hash);
+	const bool track_mips = TrackTextureMipsForTexture2D(hash, pDesc, pInitialData != NULL);
 
 	// Per-subresource CRCs, so a TextureOverride written against one mip level
 	// can be related to its sibling mips. Strictly additive - the hashes above
@@ -2339,7 +2344,7 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 	// below so the on-demand path picks it up once the game has streamed
 	// something in.
 	std::vector<uint32_t> lod_hashes;
-	if (G->track_lod_hashes)
+	if (G->track_lod_hashes || (pDesc && Texture2DCanTrackCPUContents(*pDesc) && track_mips))
 		lod_hashes = CalcTexture2DLodHashes(pDesc, pInitialData);
 
 	// Override custom settings?
@@ -2362,14 +2367,23 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 			handle_info->hash = hash;
 			handle_info->orig_hash = hash;
 			handle_info->data_hash = data_hash;
-		handle_info->lod_hashes = std::move(lod_hashes);
+			handle_info->initial_data_supplied = pInitialData != NULL;
+			handle_info->track_mips = track_mips;
+		handle_info->mip_hash_cache.resize(lod_hashes.size());
+		for (size_t i = 0; i < lod_hashes.size(); ++i) {
+			auto &mip = handle_info->mip_hash_cache[i];
+			mip.hash = lod_hashes[i];
+			mip.valid = !!pInitialData && !!pInitialData[i].pSysMem;
+			mip.deferred_generation = G->mip_hash_deferred_generation;
+			mip.validation_frame = G->frame_no;
+		}
 		// A texture is only clean if every subresource it has was hashed at
 		// creation. Anything created empty, or created with only some mips
 		// populated, starts dirty so the on-demand path reads it back the first
 		// time a mod checks a slot it is bound to.
-		bool hashes_incomplete = handle_info->lod_hashes.empty();
-		for (uint32_t lod_hash : handle_info->lod_hashes) {
-			if (!lod_hash)
+		bool hashes_incomplete = handle_info->mip_hash_cache.empty();
+		for (const auto &mip : handle_info->mip_hash_cache) {
+			if (!mip.valid)
 				hashes_incomplete = true;
 		}
 		handle_info->texture_hashes_dirty = hashes_incomplete;
@@ -2449,6 +2463,8 @@ STDMETHODIMP HackerDevice::CreateTexture3D(THIS_
 			handle_info->hash = hash;
 			handle_info->orig_hash = hash;
 			handle_info->data_hash = data_hash;
+			handle_info->initial_data_supplied = pInitialData != NULL;
+			handle_info->track_mips = false;
 			if (pDesc)
 				memcpy(&handle_info->desc3D, pDesc, sizeof(D3D11_TEXTURE3D_DESC));
 		LeaveCriticalSection(&G->mResourcesLock);

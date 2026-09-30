@@ -12,7 +12,7 @@ Every element of a pool can hold a [resource](resources.md), a [variable](variab
 
 ## Pool Options
 
-All pool options start with the `pool_` prefix. Any other option in a `[Pool]` section is treated as a `[Resource]` option of the pool's [template resource](resources.md/#template-resource).
+All pool options start with the `pool_` prefix. Any other option in a `[Pool]` section is treated as a `[Resource]` option of the pool's [template resource](resources.md#template-resource).
 
 | Option                             | Default | Description                                                                                                            |
 | ---------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
@@ -73,7 +73,7 @@ pool_index_type = ring
 
 > Pool **defaults** to `ring` index, so `pool_index_type = ring` can be omitted.
 
-See [Ring Indexing](indexing.md/#ring-indexing) for more details.
+See [Ring Indexing](indexing.md#ring-indexing) for more details.
 
 ### Static
 
@@ -94,7 +94,7 @@ PoolFoo[$i] = ref vs-cb0 ; Syntax error: expression is not a numeric literal.
 
 Accessing a static pool element has the same cost as accessing a regular `[Resource]` or global variable, since no index evaluation happens at runtime.
 
-See [Static Indexing](indexing.md/#static-indexing) for more details.
+See [Static Indexing](indexing.md#static-indexing) for more details.
 
 ### FIFO
 
@@ -108,7 +108,7 @@ pool_size = 4 ; When a fifth element is inserted, the oldest element is evicted.
 pool_index_type = fifo
 ```
 
-See [FIFO Indexing](indexing.md/#fifo-indexing) for more details.
+See [FIFO Indexing](indexing.md#fifo-indexing) for more details.
 
 ### Spatial
 
@@ -125,13 +125,13 @@ pool_spatial_radius = 2 ; Reuse an element within 2 cells of the requested posit
 
 `pool_spatial_radius` is specified in grid cells at a reference frame rate of 120 FPS and is scaled with the frame time, so the allowed movement per frame stays roughly the same at any FPS. Values below `1` are clamped to `1`.
 
-See [Spatial Indexing](indexing.md/#spatial-indexing) for more details.
+See [Spatial Indexing](indexing.md#spatial-indexing) for more details.
 
 ## Lookup Misses
 
 Applies to `fifo` and `spatial` pools.
 
-By default, reading a key that is not assigned to any element does not modify the pool. The read returns the [template resource](resources.md/#template-resource) or the [default variable value](#variables) instead:
+By default, reading a key that is not assigned to any element does not modify the pool. The read returns the [template resource](resources.md#template-resource) or the [default variable value](#variables) instead:
 
 ```ini
 [PoolFooFIFO]
@@ -239,7 +239,7 @@ type = Buffer
 data = "Hello World!"
 ```
 
-See [Template Resource](resources.md/#template-resource) for more details.
+See [Template Resource](resources.md#template-resource) for more details.
 
 ### Variables
 

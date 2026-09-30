@@ -8,7 +8,7 @@ A pool itself, without an element index, can be the target of a few operations t
 | `PoolFoo = copy_desc PoolBar`| Copy the configuration of `PoolBar` into `PoolFoo`. See [Pool Descriptor Copy](#pool-descriptor-copy). |
 | `PoolFoo = null`             | Drop the proxy, or clear the pool's index state. See [Pool Reset](#pool-reset). |
 
-`copy` is not supported between pools: elements have to be copied one by one or via [ranges](resources.md/#pool-resource-ranges).
+`copy` is not supported between pools: elements have to be copied one by one or via [ranges](resources.md#pool-resource-ranges).
 
 ## Pool Reference
 
@@ -63,7 +63,7 @@ Copies the configuration of `PoolBar` into `PoolFoo`, without copying any elemen
 * `pool_size`, `pool_index_type` and `pool_lazy_initialization`
 * `pool_spatial_radius`
 * `pool_expiration_timeout_frames` and `pool_expiration_reset_elements`
-* [Template resource](resources.md/#template-resource) options and initial data
+* [Template resource](resources.md#template-resource) options and initial data
 * [Variable template](variables.md): `pool_variable_default_value` and `pool_persist_variables`
 
 If `PoolFoo` was a proxy, the proxy is dropped first. The index state of `PoolFoo` is cleared as with `PoolFoo = null`, and the pool is re-initialized with the new size.
@@ -92,9 +92,9 @@ If `PoolFoo` is a proxy, drops the proxy and does nothing else: the pool's own e
 Otherwise, clears the pool's index state:
 
 * `fifo` and `spatial` pools forget all key assignments, and the FIFO eviction order restarts from the first element.
-* [Expiration](declaration.md/#element-expiration) records are cleared, so every element counts as expired. With `pool_expiration_reset_elements = 1` (default), all elements are reset on the next access to the pool.
+* [Expiration](declaration.md#element-expiration) records are cleared, so every element counts as expired. With `pool_expiration_reset_elements = 1` (default), all elements are reset on the next access to the pool.
 
-Element resources and variables are not reset by the operation itself. Use the [full range operations](variables.md/#full-range-operations) for that:
+Element resources and variables are not reset by the operation itself. Use the [full range operations](variables.md#full-range-operations) for that:
 
 ```ini
 PoolFoo = null     ; Forget keys and expiration.

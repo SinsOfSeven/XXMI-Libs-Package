@@ -3180,6 +3180,8 @@ float CommandListOperand::process_texture_filter(CommandListState *state)
 
 		case ResourceCopyTargetEvaluationMode::RESOURCE_SPATIAL_HASH:
 			return texture_filter_target.GetResourceSpatialHash(state);
+		case ResourceCopyTargetEvaluationMode::RESOURCE_MIP_HASH:
+			return texture_filter_target.GetResourceMipHash(state);
 			
 		case ResourceCopyTargetEvaluationMode::RESOURCE_SOURCE_STRIDE:
 		{
@@ -6880,6 +6882,10 @@ void CustomResource::OverrideOutOfBandInfo(DXGI_FORMAT *format, UINT *stride)
 
 void CustomResource::ResetRuntimeState()
 {
+	if (handle_info)
+		UnregisterCustomTextureMipHashCache(resource, handle_info.get());
+	if (handle_info)
+		handle_info->mip_hash_cache.clear();
 	if (resource) {
 		resource->Release();
 		resource = nullptr;
@@ -8393,6 +8399,10 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 			MemberArg::Type::Unsigned, // Byte Offset 
 			MemberArg::Type::Unsigned  // Byte Size 
 		}} },
+		{ L"->miphash",        9, ResourceCopyTargetEvaluationMode::RESOURCE_MIP_HASH, {{
+			MemberArg::Type::Unsigned, // Reverse mip index: 0 is the smallest mip
+			MemberArg::Type::Unsigned  // Array slice in the underlying resource
+		}} },
 		{ L"->bindflags",     11, ResourceCopyTargetEvaluationMode::RESOURCE_BIND_FLAGS },
 		{ L"->lastframe",     11, ResourceCopyTargetEvaluationMode::POOL_LAST_FRAME },
 		{ L"->hashregion",    12, ResourceCopyTargetEvaluationMode::RESOURCE_REGION_HASH, {{
@@ -8417,6 +8427,8 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 	};
 
 	IniParserResult ret = SyntaxTarget::ParseTargetMember(members, target, length, temp_target, evaluation_mode, ini_namespace, scope);
+	if (ret == IniParserResult::TOKEN_FOUND && evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_MIP_HASH)
+		G->track_mip_hashes = true;
 
 	if (ret == IniParserResult::TOKEN_FOUND
 			&& evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_FILTER)
@@ -10425,6 +10437,10 @@ void ResourceCopyTarget::SetResource(
 		}
 
 		if (custom_resource->resource != res) {
+			if (custom_resource->handle_info)
+				UnregisterCustomTextureMipHashCache(custom_resource->resource, custom_resource->handle_info.get());
+			if (custom_resource->handle_info)
+				custom_resource->handle_info->mip_hash_cache.clear();
 			if (custom_resource->resource)
 				custom_resource->resource->Release();
 			custom_resource->resource = res;
@@ -11225,6 +11241,44 @@ float ResourceCopyTarget::GetResourceRegionHash(CommandListState* state)
 	return ret;
 }
 
+float ResourceCopyTarget::GetResourceMipHash(CommandListState* state)
+{
+	ID3D11View *view = nullptr;
+	ID3D11Resource *resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
+	float ret = 0.0f;
+	if (resource) {
+		D3D11_RESOURCE_DIMENSION dimension;
+		resource->GetType(&dimension);
+		if (dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+			CustomResource *custom_resource = type == ResourceCopyTargetType::CUSTOM_RESOURCE
+				? GetCustomResource(state) : nullptr;
+			if (custom_resource && !custom_resource->handle_info)
+				custom_resource->handle_info = std::make_unique<ResourceHandleInfo>();
+			if (custom_resource)
+				RegisterCustomTextureMipHashCache(resource, custom_resource->handle_info.get());
+			D3D11_TEXTURE2D_DESC desc;
+			static_cast<ID3D11Texture2D *>(resource)->GetDesc(&desc);
+			float reverse_mip = member_args[0].GetValue(state);
+			float array_slice = member_args[1].GetValue(state);
+			// Check before integer conversion, including NaN, infinity, fractions
+			// and negatives. Both indices address the resource, not the SRV range.
+			if (reverse_mip >= 0 && reverse_mip < desc.MipLevels &&
+					array_slice >= 0 && array_slice < desc.ArraySize &&
+					reverse_mip == floorf(reverse_mip) && array_slice == floorf(array_slice)) {
+				uint32_t hash;
+				if (GetTexture2DMipHash(state->mHackerContext, resource,
+						(UINT)reverse_mip, (UINT)array_slice, &hash,
+						custom_resource ? custom_resource->handle_info.get() : nullptr))
+					ret = EncodeFloat30(hash);
+			}
+		}
+		resource->Release();
+	}
+	if (view)
+		view->Release();
+	return ret;
+}
+
 float ResourceCopyTarget::GetResourceSpatialHash(CommandListState* state)
 {
 	UINT stride = 0, offset = 0;
@@ -11309,11 +11363,34 @@ float ResourceCopyTarget::EvaluateResourceFilter(CommandListState* state)
 		if (!custom_resource)
 			return -0.0f;
 
-		// TODO(shader filters): custom resources are not content-hashed yet, so
-		// pass no hash and let hash literals never match. Hashing them on the
-		// fly (or caching a hash on the CustomResource) would let
-		// `ResourceFoo->Match(<hash>)` work.
-		return filter->matches(nullptr, custom_resource, state->call_info) ? 1.0f : 0.0f;
+		if (!filter->has_hash)
+			return filter->matches(nullptr, custom_resource, state->call_info) ? 1.0f : 0.0f;
+
+		// Resolve the D3D resource only when evaluation reaches a hash leaf.
+		// A matching description leaf can short-circuit an OR expression.
+		ID3D11View *view = nullptr;
+		ID3D11Resource *resource = nullptr;
+		uint64_t resource_hash = 0;
+		std::vector<uint32_t> mip_hashes;
+		bool resolved = false;
+		FilterExpr::HashMatcher match_hash = [&](uint64_t value) {
+			if (!resolved) {
+				resolved = true;
+				resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr, nullptr);
+				if (resource) {
+					resource_hash = GetResourceHashSafe(resource);
+					mip_hashes = GetCachedTexture2DMipHashes(resource, custom_resource->handle_info.get());
+				}
+			}
+			return resource && ((resource_hash && value == resource_hash) ||
+				(value <= UINT32_MAX && std::find(mip_hashes.begin(), mip_hashes.end(), (uint32_t)value) != mip_hashes.end()));
+		};
+		bool matched = filter->matches(nullptr, custom_resource, state->call_info, &match_hash);
+		if (view)
+			view->Release();
+		if (resource)
+			resource->Release();
+		return matched ? 1.0f : 0.0f;
 	}
 
 	ID3D11View* view = nullptr;
@@ -11336,30 +11413,41 @@ float ResourceCopyTarget::EvaluateResourceFilter(CommandListState* state)
 
 	D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
 	resource->GetType(&dimension);
+	std::vector<uint32_t> mip_hashes;
+	FilterExpr::HashMatcher match_hash;
+	if (filter->has_hash) {
+		if (dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+			mip_hashes = GetCachedTexture2DMipHashes(resource);
+		match_hash = [resource_hash, &mip_hashes](uint64_t value) {
+			return value == resource_hash ||
+				(value <= UINT32_MAX && std::find(mip_hashes.begin(), mip_hashes.end(), (uint32_t)value) != mip_hashes.end());
+		};
+	}
+	const auto hash_matcher = filter->has_hash ? &match_hash : nullptr;
 
 	switch (dimension) {
 		case D3D11_RESOURCE_DIMENSION_BUFFER: {
 			D3D11_BUFFER_DESC desc;
 			static_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
-			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info, hash_matcher);
 			break;
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
 			D3D11_TEXTURE1D_DESC desc;
 			static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
-			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info, hash_matcher);
 			break;
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
 			D3D11_TEXTURE2D_DESC desc;
 			static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
-			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info, hash_matcher);
 			break;
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
 			D3D11_TEXTURE3D_DESC desc;
 			static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
-			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info, hash_matcher);
 			break;
 		}
 	}
@@ -12896,6 +12984,10 @@ void ResourceCopyOperation::CopyResourceToResource(
 				dst_custom_resource->SetHandleInfo(src_resource, 0, buf_dst_size);
 			state->mOrigContext1->CopyResource(dst_resource, src_resource);
 		}
+		if ((G->track_mip_hashes || ResourceTracksMips(dst_resource)) &&
+			!(options & ResourceCopyOptions::COPY_DESC))
+			MarkTexture2DHashesDirty(dst_resource, ~0u,
+				state->mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
 	} else {
 		COMMAND_LIST_LOG(state, "  copying by reference\n");
 		Profiling::resource_reference_copies++;

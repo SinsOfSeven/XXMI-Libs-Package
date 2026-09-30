@@ -12,6 +12,16 @@ $frame_id = FRAME_NUMBER
 
 The frame boundary is defined by the `Present` call.
 
+## `FRAME_ANALYSIS`
+
+Returns `1` while frame analysis is capturing the current frame and `0` otherwise. Use it to run INI commands only during a frame analysis capture:
+
+```ini
+if FRAME_ANALYSIS
+    ; Run only while a frame analysis capture is active.
+endif
+```
+
 ## `DRAW_NUMBER`
 
 Returns the number of the current draw call within the frame.

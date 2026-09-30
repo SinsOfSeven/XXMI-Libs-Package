@@ -2187,6 +2187,10 @@ static void ParseResourceSections()
 	// Edges point at entries of the maps cleared below:
 	ClearDeferredBindFlags();
 	customResourcePools.clear();
+	for (auto &entry : customResources) {
+		if (entry.second.handle_info)
+			UnregisterCustomTextureMipHashCache(entry.second.resource, entry.second.handle_info.get());
+	}
 	customResources.clear();
 
 	IniSections::iterator lower = ini_sections.lower_bound(wstring(L"Pool"));
@@ -2975,6 +2979,7 @@ static void ParseShaderRegexSections()
 	L"match_bind_flags", \
 	L"match_cpu_access_flags", \
 	L"match_misc_flags", \
+	L"match_initial_data", \
 	L"match_byte_width", \
 	L"match_stride", \
 	L"match_mips", \
@@ -3001,6 +3006,7 @@ static void ParseShaderRegexSections()
 wchar_t *TextureOverrideIniKeys[] = {
 	L"hash",
 	L"lod_hash",
+	L"track_mips",
 	L"format",
 	L"width",
 	L"height",
@@ -3242,6 +3248,7 @@ static void parse_texture_override_common(const wchar_t *id, TextureOverride *ov
 
 	override->expand_region_copy = GetIniBool(id, L"expand_region_copy", false, NULL);
 	override->deny_cpu_read = GetIniBool(id, L"deny_cpu_read", false, NULL);
+	override->track_mips = GetIniBool(id, L"track_mips", false, NULL);
 
 	// Draw call context matching (shared with [Filter<Name>] sections):
 	parse_filter_numeric_field(id, L"match_first_vertex", &override->filter.FirstVertex);
@@ -3376,6 +3383,8 @@ static void parse_texture_override_fuzzy_match(const wchar_t *section)
 	parse_filter_flags_field(section, L"match_bind_flags", &filter->BindFlags, CustomResourceBindFlagNames);
 	parse_filter_flags_field(section, L"match_cpu_access_flags", &filter->CPUAccessFlags, ResourceCPUAccessFlagNames);
 	parse_filter_flags_field(section, L"match_misc_flags", &filter->MiscFlags, ResourceMiscFlagNames);
+	filter->initial_data_expected = GetIniBool(section, L"match_initial_data", false,
+		&filter->initial_data_match_set);
 
 	// Format:
 	parse_filter_format_field(section, L"match_format", &filter->Format);
@@ -3398,6 +3407,8 @@ static void parse_texture_override_fuzzy_match(const wchar_t *section)
 	}
 
 	parse_texture_override_common(section, fuzzy->texture_override, true);
+	if (fuzzy->texture_override->track_mips)
+		G->has_track_mips_overrides.store(true, std::memory_order_relaxed);
 
 	if (!G->mFuzzyTextureOverrides.insert(std::shared_ptr<FuzzyMatchResourceDesc>(fuzzy)).second) {
 		IniWarning("BUG: Unexpected error inserting fuzzy texture override\n");
@@ -3652,6 +3663,7 @@ static void ParseTextureOverrideSections()
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 
 	G->mTextureOverrideMap.clear();
+	G->has_track_mips_overrides.store(false, std::memory_order_relaxed);
 	G->mFuzzyTextureOverrides.clear();
 	G->mTextureOverrideLodMap.reset();
 	InvalidateTextureOverrideCandidates();
@@ -3671,6 +3683,9 @@ static void ParseTextureOverrideSections()
 	// targeted. It is a different kind of key, not a fuzzy description match, so
 	// it composes with match_* keys rather than excluding them.
 	lod_hash = (uint32_t)GetIniHash(id, L"Lod_Hash", 0, &lod_hash_found);
+	if (GetIniBool(id, L"track_mips", false, NULL) &&
+		(((!found || !hash) && !texture_override_section_has_fuzzy_match_keys(id)) || lod_hash_found))
+		IniWarningW(L"track_mips=1 requires a nonzero hash= or fuzzy match options and cannot be used with lod_hash=\n - [%ls]\n", id);
 	if (lod_hash_found && !lod_hash) {
 		IniWarningW(L"lod_hash= must not be 0 - a subresource with unknown contents is never matched\n - [%ls]\n", id);
 		lod_hash_found = false;
@@ -3720,6 +3735,8 @@ static void ParseTextureOverrideSections()
 
 	// Important that we do *not* register the command lists yet:
 	parse_texture_override_common(id, override, false);
+	if (override->track_mips && hash)
+		G->has_track_mips_overrides.store(true, std::memory_order_relaxed);
 
 	// Warn if same hash is used two or more times in sections that
 	// do not have a draw context match or match_priority:
@@ -3775,6 +3792,30 @@ static void ParseTextureOverrideSections()
 			}
 		}
 	}
+
+	// Refresh per-instance CPU mip tracking for resources that were created
+	// before this config (or its previous version) was loaded. This keeps write
+	// hooks off the fuzzy-rule scan while still making reloads take effect.
+	EnterCriticalSectionPretty(&G->mResourcesLock);
+		for (auto &entry : G->mResources) {
+			ResourceHandleInfo &info = entry.second;
+			info.track_mips = false;
+			if (info.type != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+				continue;
+			auto hash_overrides = G->mTextureOverrideMap.find(info.orig_hash);
+			if (hash_overrides != G->mTextureOverrideMap.end())
+				for (const auto &to : hash_overrides->second)
+					info.track_mips |= to.track_mips;
+			for (const auto &fuzzy : G->mFuzzyTextureOverrides) {
+				const TextureOverride *to = fuzzy->texture_override;
+				if (to->track_mips && to->filter.matches_desc(&info.desc2D) &&
+					to->filter.matches_initial_data(info.initial_data_supplied)) {
+					info.track_mips = true;
+					break;
+				}
+			}
+		}
+	LeaveCriticalSection(&G->mResourcesLock);
 	LeaveCriticalSection(&G->mCriticalSection);
 }
 

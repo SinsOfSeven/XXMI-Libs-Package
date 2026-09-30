@@ -21,7 +21,7 @@ The section name after the `Filter` prefix is the filter's identifier. `[Filter2
 
 ## Resource description fields
 
-All of the fuzzy `[TextureOverride]` field names are supported. Constraints on resource dimensions (`ByteWidth`/`StructureByteStride` vs. texture fields) automatically restrict which resource types the filter can match.
+Resource description fields are shared with fuzzy `[TextureOverride]` sections. Constraints on resource dimensions (`ByteWidth`/`StructureByteStride` vs. texture fields) automatically restrict which resource types the filter can match. `match_initial_data` is specific to fuzzy `[TextureOverride]` sections because it describes the `pInitialData` creation argument, not a resource description; it is not supported in `[Filter<Name>]` sections.
 
 | Key | Applies to |
 | --- | --- |
@@ -110,7 +110,7 @@ $is_exact = ps-t0->Match(Filter2k & !Filter4k)  ; 2K and not 4K
 $one_of   = ps-t0->Match(FilterA ^ FilterB)     ; exactly one of A, B
 ```
 
-`&` and `|` short-circuit, and the whole expression reads the resource description once regardless of how many filters it contains — `ps-t0->Match(A | B)` costs the same as a single `->Match(A)`.
+`&` and `|` short-circuit. The resource description is read once for the expression, but each filter reached by evaluation still checks its own constraints.
 
 > **Note:** The `&` that joins bounds *inside a `match_*` value* (`match_height = >100 & <500`) belongs to the fuzzy-match grammar and is unrelated to the boolean `&` operator described here.
 
@@ -130,7 +130,14 @@ Hashes are singletons and only compare equal, so accepting several of them is do
 $is_either = ps-t0->Match(1234abcd | 89abcdef)
 ```
 
-8 digits are the current 32-bit texture hash; 16 digits are reserved for the future shader hash. A purely hexadecimal token is never ambiguous with a filter name because a name always carries the `Filter` prefix, which contains non-hex letters. Custom resources (`[Resource...]`) are not content-hashed yet, so hash literals never match against them.
+8 digits compare against the ordinary 32-bit resource hash **or any current, cached Texture2D mip CRC32C**. The latter includes mip hashes requested with `->MipHash(reverse_mip, array_slice)` and completed hashes from `track_lod_hashes`. `->Match(...)` never reads a mip back from the GPU, so a mip that has not been cached cannot match yet. It compares the full 8-digit CRC, not the 30-bit value encoded as an INI float by `->MipHash`. A 16-digit hash remains reserved for future shader matching.
+
+```ini
+$mip_value = ResourceFoo->MipHash(0, 0) ; Populates the smallest mip's cache if needed.
+$matches = ResourceFoo->Match(1234abcd) ; Tests its full CRC and the ordinary hash.
+```
+
+The order matters when both lines run in one command list. A subsequent write to the mip invalidates its cached CRC; `->Match(...)` then stops matching it until another `->MipHash(...)` request refreshes it. Description-only filters remain available for `[Resource...]` targets without creating their D3D resource. When evaluation reaches a hash operand on `[Resource...]`, it resolves the actual resource and checks its available hashes; it may instantiate that resource. A purely hexadecimal token is unambiguous because filter names carry the non-hex `Filter` prefix.
 
 ## Usage
 
@@ -153,7 +160,7 @@ endif
 
 Because the result is a normal expression value, filters compose with the rest of the expression language (arithmetic, comparisons, `if` conditions, etc.).
 
-Filters are cheap compared to `store`: they read a resource description (and optionally the current draw call info) without any GPU readback.
+`->Match(...)` itself performs no GPU readback. An earlier `->MipHash(...)` request can block to fill its cache; later `->Match(...)` calls reuse the result.
 
 See the [Resource Metadata](resource-metadata.md#match) documentation for the `->Match(<expression>)` member details.
 
@@ -169,15 +176,18 @@ The hook points are already marked in the code:
 
 Filtering will reuse the same `FilterExpr` matcher, with the shader hash (the 16-digit form accepted by `->Match(...)`) and/or the shader's derived bytecode as the match context instead of a resource description.
 
-## Relationship to fuzzy texture overrides
+## Relationship to texture overrides
 
-Filters and fuzzy `[TextureOverride]` sections share a single matching implementation: a `[TextureOverride]`'s conditions are stored in the exact same `FilterMatch` structure a `[Filter<Name>]` section uses (`TextureOverride::filter`). As a result, the same `match_*` fields and the same numeric grammar apply to both, and a `[TextureOverride]` can now combine constraints just like a filter:
+Filters and fuzzy `[TextureOverride]` sections share a matching implementation and numeric grammar. A fuzzy override has no `hash=` or `lod_hash=` key, so its resource description constraints can be combined just like a filter:
 
 ```ini
 [TextureOverrideExample]
-hash = 1234abcd
 match_height = >100 & <500
 match_index_count = >=6
 ```
 
-The differences are only in what the section *does* once it matches (a `[TextureOverride]` applies its command lists; a `[Filter]` evaluates to `1.0`/`0.0`) and in the defaults: a fuzzy `[TextureOverride]` defaults `match_usage=default`, whereas a filter does not.
+Fuzzy overrides also accept `match_initial_data = 0|1` to distinguish a null `pInitialData` creation argument from a non-null one. This is useful with `track_mips=1` for resources selected by description; see [LOD Hashes](lod-hashes.md).
+
+For a keyed override (`hash=` or `lod_hash=`), the parser applies draw conditions such as `match_index_count`, but does not apply resource description conditions such as `match_height`. It warns if those descriptor keys are present. Use a fuzzy override when matching by description, or a separate `->Match(FilterName)` expression when the script needs both checks. See [LOD Hashes](lod-hashes.md) for the `lod_hash=` key.
+
+A `[TextureOverride]` runs its command lists when it matches; a `[Filter]` evaluates to `1.0` or `0.0`. A fuzzy `[TextureOverride]` defaults to `match_usage=default`, whereas a filter does not.

@@ -18,6 +18,8 @@ $resource_id_d3d11 = @vs-t0
 
 The identity value is derived from the **C++ pointer** to the underlying D3D11 resource. It has **nothing** to do with the resource data itself, so it is not a replacement for data hashes.
 
+Different views of the same texture share this underlying resource identity. All mips and array slices belong to that resource; they do not have separate resource pointers. Different live texture objects have separate identities even if their pixels are identical. Pointer addresses can be reused after destruction, and the encoded identity can collide. Do not treat `@resource` as a permanent content identifier.
+
 > It's essentially a 30-bit hash of 48-bit virtual memory address (standard x86-64 processors typically don't use upper 16 bits). This allows the value to fit into INI variables, which use IEEE-754 floats, where upper 7 bits become the exponent, and lower 23 bits become the mantissa.
 
 ### Non-null Resource Check
@@ -36,9 +38,40 @@ endif
 
 Resource attributes can be accessed using the `->` syntax.
 
+### `MipHash(reverse_mip, array_slice)`
+
+Requests the CRC32C of one Texture2D mip and encodes its **low 30 bits in a float**, using the same `EncodeFloat30` representation as `@resource`. This is independent of `checktextureoverride` and requires neither `track_lod_hashes` nor `track_lod_hash_updates`. Parsing a `->MipHash` expression automatically enables update tracking.
+
+```ini
+$smallest_hash = ps-t0->MipHash(0, 0)
+$next_hash = ps-t0->MipHash(1, 0)
+$slice_one_hash = ResourceTexture->MipHash(0, 1)
+
+if $smallest_hash
+    ; A completed hash is available, even when its CRC32C is zero.
+endif
+```
+
+Both arguments are required nonnegative integers; variables and expressions are accepted. Indices address the **underlying resource**, regardless of the bound view's mip or array range. Array slices use normal zero-based indexing. Mips use reverse indexing: `0` is the smallest allocated mip, `1` is the next larger mip. The native mip index is `MipLevels - 1 - reverse_mip`.
+
+Populating larger mips does not move these indices or invalidate hashes of untouched mips. If a game replaces a texture with a larger allocation, the same reverse index identifies the same dimensions only if the mip chains have the same smallest mip. Equal dimensions do not guarantee equal pixels. Unpopulated mip memory has no reliable content hash until the game initializes it; the API does not expose a populated-mip count.
+
+The first request for an unknown mip copies and maps that mip before returning its hash to the current command list. That map can wait for the GPU. A mip captured at creation or by a [`track_mips=1` override](lod-hashes.md) is already cached and needs no readback. Results are cached by the actual resource and subresource, not by `@resource` or the truncated hash. Writing another mip does not dirty this cache. Whole-resource copies, discards and mip generation may invalidate multiple entries. Deferred command-list execution conservatively invalidates cached mip hashes because its writes occur after recording. Render targets, depth textures, UAV textures and shared resources are conservatively refreshed each frame when requested.
+
+The cache follows the same useful rule as `cache_resource_data`: a write invalidates the affected cached value and the next explicit read refreshes it. The mip cache stores **full CRCs**, not a CPU copy of the image bytes; it works independently of the buffer-only `cache_resource_data` setting. `->Match(1234abcd)` can compare an eight-digit literal with any current mip CRC already cached for that resource, without initiating a readback. Evaluate `->MipHash(...)` first if the hash needs to be fetched in the current command list. The encoded INI float retains only 30 CRC bits; use the full `crc=` from frame analysis when writing a `->Match(...)` literal.
+
+| Result | Meaning |
+| --- | --- |
+| Nonzero float | Encoded low 30 bits of a completed CRC32C, including CRC zero |
+| `0` | No resource, non-Texture2D resource, invalid index, or unavailable hash |
+
+Multisampled textures and reads on deferred contexts are unsupported. The encoded value uses the same float format as `@resource`, but its input is the mip CRC rather than a hashed resource pointer. `lod_hash=` continues to use the full CRC32C and is unchanged.
+
+During frame analysis, fresh readbacks emit `miphash resource=... subresource=... reverse_mip=... array=... crc=... value30=...`. `value30` is the 30-bit payload before float encoding. Cache hits do not repeat that line. Use the raw pointer and subresource together to inspect a game's streaming behavior. Compare captures before and after streaming to determine whether it updates one resource or replaces it. The profiler includes these requests in its existing `track_lod_hashes` row.
+
 ### `BindFlags`
 
-Returns [D3D11_BIND_FLAGs](../expressions/literals.md/#d3d11_bind_flags-enum-literals) of a resource.
+Returns [D3D11_BIND_FLAGs](../expressions/literals.md#d3d11_bind_flags-enum-literals) of a resource.
 
 ```ini
 $bind_flags = ResourceFoo->BindFlags
@@ -78,7 +111,7 @@ $stride = ResourceFoo->Stride
 
 ### `Format`
 
-Returns [DXGI_FORMAT](../expressions/literals.md/#dxgi_format-enum-literals) of resource (integer enum value).
+Returns [DXGI_FORMAT](../expressions/literals.md#dxgi_format-enum-literals) of resource (integer enum value).
 
 ```ini
 $format = ResourceFoo->Format
@@ -150,7 +183,7 @@ Returns a hash of the buffer contents in the specified region.
 $object_id = vs-cb1->HashRegion(0, 64) ; Hash of the first 64 bytes visible to the shader.
 ```
 
-The value is a CRC32C of the data encoded as a 30-bit float, so it fits an INI variable and can be compared or used as a [FIFO pool](../pools/indexing.md/#fifo-indexing) key. It is derived from the data itself, unlike the [resource identity](#resource-identity), so equal data in different buffers produces the same hash.
+The value is a CRC32C of the data encoded as a 30-bit float, so it fits an INI variable and can be compared or used as a [FIFO pool](../pools/indexing.md#fifo-indexing) key. It is derived from the data itself, unlike the [resource identity](#resource-identity), so equal data in different buffers produces the same hash.
 
 Hashing requires a CPU-side copy of the buffer contents, so the buffer type has to be listed in `cache_resource_data` in the `[Rendering]` section. Hashing a buffer of a type that is not cached returns an [error value](#error-values).
 
@@ -178,7 +211,7 @@ Returns a **spatial hash** of a world position stored in the buffer: the positio
 $hash = vs-cb1->SpatialHash(12, 13, 14, 0.5) ; Position at floats 12-14 of the visible region, 0.5 unit cells.
 ```
 
-Positions within the same cell produce the same hash, and positions in neighboring cells produce hashes that a [spatial pool](../pools/indexing.md/#spatial-indexing) can resolve to the same element. The grid wraps around along each axis, so positions `4096` cells apart on X or Z (`256` on Y) collide.
+Positions within the same cell produce the same hash, and positions in neighboring cells produce hashes that a [spatial pool](../pools/indexing.md#spatial-indexing) can resolve to the same element. The grid wraps around along each axis, so positions `4096` cells apart on X or Z (`256` on Y) collide.
 
 The same data caching rules as for [`HashRegion`](#hashregionbyte_offset-byte_size) apply.
 
@@ -203,7 +236,7 @@ Because it is an ordinary expression operand it can be composed with arithmetic,
 $score = ps-t1->Match(FilterRatio) + ps-t2->Match(FilterIndex)
 ```
 
-`->Match(...)` resolves the underlying resource (or the *declared* description of a custom resource) and applies the filter's resource and draw call constraints without any GPU readback. See [Filters](filters.md) for the `[Filter<Name>]` section syntax and supported `match_*` fields.
+`->Match(...)` applies the filter's resource and draw call constraints without any GPU readback. A raw hash literal compares against the ordinary resource hash and current cached mip CRCs. For a custom resource, description-only filters use its declared metadata; a hash expression resolves its D3D resource and may instantiate it. See [Filters](filters.md) for the `[Filter<Name>]` section syntax and supported `match_*` fields.
 
 > `->Match(...)` is only valid as an expression operand and cannot be used as a command argument target or an assignment destination.
 
@@ -221,7 +254,7 @@ Accessing attributes through pipeline slots is slower because the underlying D3D
 vb0->Size
 ```
 
-Typical access times are approximately ~1 ns for custom resources and ~10–100 ns for slots, depending on the operation and environment.
+The cost depends on the target and getter. A pipeline slot may require querying the bound D3D11 resource; data getters such as `HashRegion` can also require a GPU readback when cached data is unavailable.
 
 ### Error Values
 

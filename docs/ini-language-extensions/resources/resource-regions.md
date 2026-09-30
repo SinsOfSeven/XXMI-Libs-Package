@@ -21,7 +21,7 @@ Both operations use the region currently configured for `vs-cb0`, rather than th
 
 The `->Offset` attribute can be used to retrieve the absolute byte offset of the currently configured region.
 
-See [Resource Metadata → `Offset`](resource-metadata.md/#offset) for details.
+See [Resource Metadata → `Offset`](resource-metadata.md#offset) for details.
 
 ## Explicit Resource Regions
 

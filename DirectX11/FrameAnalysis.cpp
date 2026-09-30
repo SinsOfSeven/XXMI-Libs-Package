@@ -247,11 +247,13 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *re
 		// chain. Dimensions are included so a capture shows the resolution of
 		// each mip that is really there.
 		const ResourceHandleInfo &resource_info = G->mResources.at(resource);
-		const std::vector<uint32_t> &lod_hashes = resource_info.lod_hashes;
-		if (!lod_hashes.empty()) {
+		const auto &mip_hashes = resource_info.mip_hash_cache;
+		if (!mip_hashes.empty()) {
 			size_t populated = 0;
-			for (uint32_t lod_hash : lod_hashes) {
-				if (lod_hash)
+			for (const auto &mip : mip_hashes) {
+				if (mip.valid && mip.hashed_generation == mip.generation &&
+					(!resource_info.may_have_deferred_writes ||
+						mip.deferred_generation == G->mip_hash_deferred_generation))
 					populated++;
 			}
 
@@ -270,10 +272,12 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *re
 			// The subresource index counts array slices as well as mips, so the
 			// mip within a slice is index % MipLevels.
 			bool first = true;
-			for (UINT i = 0; i < lod_hashes.size(); i++) {
-				if (!lod_hashes[i])
+			for (UINT i = 0; i < mip_hashes.size(); i++) {
+				if (!mip_hashes[i].valid || mip_hashes[i].hashed_generation != mip_hashes[i].generation ||
+					(resource_info.may_have_deferred_writes &&
+						mip_hashes[i].deferred_generation != G->mip_hash_deferred_generation))
 					continue;
-				fprintf(frame_analysis_log, first ? " lod=[%08x@%u" : " %08x@%u", lod_hashes[i], i);
+				fprintf(frame_analysis_log, first ? " lod=[%08x@%u" : " %08x@%u", mip_hashes[i].hash, i);
 				first = false;
 			}
 			if (!first)
