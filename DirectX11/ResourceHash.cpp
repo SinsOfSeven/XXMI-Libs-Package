@@ -615,7 +615,7 @@ static size_t Texture3DLength(
 }
 
 static uint32_t hash_tex2d_data(uint32_t hash, const void *data, size_t length,
-		const D3D11_TEXTURE2D_DESC *pDesc, bool zero_padding,
+		const D3D11_TEXTURE2D_DESC *pDesc, UINT level, bool zero_padding,
 		bool skip_padding, UINT mapped_row_pitch)
 {
 	size_t row_pitch, slice_pitch, row_count;
@@ -653,7 +653,13 @@ static uint32_t hash_tex2d_data(uint32_t hash, const void *data, size_t length,
 	if (!zero_padding && !skip_padding)
 		return crc32c_hw(hash, data, length);
 
-	DirectX::LoaderHelpers::GetSurfaceInfo(pDesc->Width, pDesc->Height, pDesc->Format, &slice_pitch, &row_pitch, &row_count);
+	// The row geometry comes from this mip level's dimensions, not the base
+	// level's, so that hashing a subresource other than level 0 walks the same
+	// rows the game actually wrote. Level 0 reduces to the base dimensions, so
+	// existing hashes are unchanged.
+	UINT mip_width = max(pDesc->Width >> level, 1);
+	UINT mip_height = max(pDesc->Height >> level, 1);
+	DirectX::LoaderHelpers::GetSurfaceInfo(mip_width, mip_height, pDesc->Format, &slice_pitch, &row_pitch, &row_count);
 
 	uint8_t *sptr = (uint8_t*)data;
 	size_t msize = min(row_pitch, mapped_row_pitch);
@@ -727,7 +733,7 @@ uint32_t CalcTexture2DDataHash(
 			LogDebug("  Using 3DMigoto v1.2.1 compatible Texture2D CRC calculation\n");
 		}
 		return hash_tex2d_data(hash, pInitialData[0].pSysMem, length_v12,
-				pDesc, zero_padding, false, pInitialData[0].SysMemPitch);
+				pDesc, 0, zero_padding, false, pInitialData[0].SysMemPitch);
 	}
 
 	// If we are here it means the old length had overflowed the buffer,
@@ -773,7 +779,7 @@ uint32_t CalcTexture2DDataHash(
 
 	length = Texture2DLength(pDesc, &pInitialData[0], 0);
 	hash = hash_tex2d_data(hash, pInitialData[0].pSysMem, length,
-			pDesc, false, true, pInitialData[0].SysMemPitch);
+			pDesc, 0, false, true, pInitialData[0].SysMemPitch);
 
 	return hash;
 }
@@ -803,9 +809,240 @@ uint32_t CalcTexture2DDataHashAccurate(
 	// Passing length=INT_MAX, since that is an upper bound and
 	// hash_tex2d_data will work it out from DirectXTK
 	hash = hash_tex2d_data(hash, pInitialData[0].pSysMem, INT_MAX,
-			pDesc, false, true, pInitialData[0].SysMemPitch);
+			pDesc, 0, false, true, pInitialData[0].SysMemPitch);
 
 	return hash;
+}
+
+// Per-subresource CRCs, for associating a mip with its sibling mips without
+// doing any image processing.
+//
+// The regular texture hash only ever covers subresource 0 - see the comment in
+// CalcTexture2DDataHash for why folding the rest of the chain into that hash is
+// not something we can do. These hashes are therefore purely additive: they are
+// recorded alongside hash/data_hash, which are untouched, so every existing
+// TextureOverride keeps matching exactly as it did before. All the game gives us
+// at creation is pInitialData, which already contains every subresource of every
+// array slice with its own SysMemPitch, so this costs one extra CRC per subresource
+// and no readback.
+
+// Number of entries a LOD hash vector needs to cover every subresource.
+static UINT Texture2DSubresourceCount(const D3D11_TEXTURE2D_DESC *pDesc)
+{
+	return max(pDesc->MipLevels, 1) * max(pDesc->ArraySize, 1);
+}
+
+// CRCs one subresource from a pitched source buffer. Used for whole subresource
+// updates, where the row pitch comes from the caller rather than from a
+// D3D11_SUBRESOURCE_DATA, so the compression case has to be derived from the
+// format instead.
+static uint32_t CalcSubresourceHash(const D3D11_TEXTURE2D_DESC *pDesc, UINT mip,
+		const void *data, UINT row_pitch)
+{
+	UINT mip_width = max(pDesc->Width >> mip, 1);
+	UINT mip_height = max(pDesc->Height >> mip, 1);
+	UINT block_size = CompressedFormatBlockSize(pDesc->Format);
+
+	if (block_size) {
+		// A compressed subresource is a dense array of 4x4 blocks with no row
+		// padding, and a "row" is meaningless until the texture has been
+		// decompressed - which is why Texture2DLength derives the length from
+		// the mip dimensions rather than from the pitch. The block array is
+		// already exact, so hash it as-is rather than through hash_tex2d_data,
+		// whose row walking assumes uncompressed geometry and would skip real
+		// block bytes.
+		UINT padded_width = (mip_width + 3) & ~0x3;
+		UINT padded_height = (mip_height + 3) & ~0x3;
+		size_t length = padded_width * padded_height / 16 * block_size;
+		return crc32c_hw(0, data, length);
+	}
+
+	// Uncompressed: walk the rows and skip the pitch padding, matching the
+	// 1.2.11+ path so a subresource is hashed the same way the main hash hashes
+	// subresource 0.
+	return hash_tex2d_data(0, data, (size_t)row_pitch * mip_height, pDesc, mip,
+			false, true, row_pitch);
+}
+
+// Returns a LOD hash per subresource of the texture about to be created, indexed
+// by D3D11CalcSubresource. An entry is 0 when that subresource had no initial
+// data, which is normal: many textures are created empty and streamed in later,
+// and the on-demand path fills those entries in when a slot is checked.
+std::vector<uint32_t> CalcTexture2DLodHashes(const D3D11_TEXTURE2D_DESC *pDesc,
+		const D3D11_SUBRESOURCE_DATA *pInitialData)
+{
+	std::vector<uint32_t> hashes;
+	UINT mip_levels, array_size, mip, slice;
+
+	if (!pDesc)
+		return hashes;
+
+	mip_levels = max(pDesc->MipLevels, 1);
+	array_size = max(pDesc->ArraySize, 1);
+
+	hashes.assign(Texture2DSubresourceCount(pDesc), 0);
+	if (!pInitialData)
+		return hashes;
+
+	for (mip = 0; mip < mip_levels; mip++) {
+		for (slice = 0; slice < array_size; slice++) {
+			UINT subresource = D3D11CalcSubresource(mip, slice, mip_levels);
+			const D3D11_SUBRESOURCE_DATA *sub = &pInitialData[subresource];
+			if (!sub->pSysMem)
+				continue;
+			hashes[subresource] = CalcSubresourceHash(pDesc, mip, sub->pSysMem, sub->SysMemPitch);
+		}
+	}
+
+	return hashes;
+}
+
+// Marks a texture's tracked hashes stale.
+//
+// Deliberately cheap, and deliberately not a hash. The write hooks that call this
+// run on every update the game makes, including for textures no mod will ever ask
+// about, so all they do is set a flag. The readback that actually costs something
+// is deferred to EnsureTexture2DHashes below. This is the "flag it dirty on update
+// events" half of on-demand hashing.
+void MarkTexture2DHashesDirty(ID3D11Resource *resource)
+{
+	ResourceHandleInfo *info;
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+
+	info = GetResourceHandleInfo(resource);
+	if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+		info->texture_hashes_dirty = true;
+
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+
+// Clears a texture's dirty flag without hashing anything.
+//
+// Used for resources that can never be read back - multisampled, or a format D3D
+// will not create as a staging resource. Leaving the flag set would make every
+// subsequent check retry the same impossible work, and log about it each time.
+static void ClearTexture2DHashesDirty(ID3D11Resource *resource)
+{
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+		ResourceHandleInfo *info = GetResourceHandleInfo(resource);
+		if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+			info->texture_hashes_dirty = false;
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+
+// Brings a texture's tracked hashes up to date if they are stale, reading the
+// resource back through a staging texture first.
+//
+// Called from checktextureoverride rather than from the write hooks, so the cost
+// is paid only for slots a mod actually checks, and skipped entirely once the
+// resource is current: a slot checked every frame with no update in between does
+// no work at all.
+//
+// Reads back one subresource at a time rather than with a single CopyResource,
+// because each subresource is hashed independently by design and a plain copy
+// would not let them be mapped separately without a second full-size allocation.
+void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource)
+{
+	ID3D11DeviceContext1 *orig_context;
+	ID3D11Texture2D *staging;
+	D3D11_TEXTURE2D_DESC desc;
+	ResourceHandleInfo *info;
+	std::vector<uint32_t> crcs;
+	UINT count, mip_levels, subresource;
+	bool want_lod, want_data_hash;
+	Profiling::State profiling_state;
+
+	if (!context || !resource)
+		return;
+
+	if (Profiling::mode == Profiling::Mode::SUMMARY)
+		Profiling::start(&profiling_state);
+
+	// Take what we need and drop the lock before touching D3D. The handle info
+	// pointer is not held across the readback because releasing the resource would
+	// invalidate it; the desc is copied out for the same reason.
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+		info = GetResourceHandleInfo(resource);
+		if (!info || info->type != D3D11_RESOURCE_DIMENSION_TEXTURE2D ||
+				!info->texture_hashes_dirty) {
+			LeaveCriticalSection(&G->mCriticalSection);
+			return;
+		}
+		want_lod = G->track_lod_hashes || G->track_lod_hash_updates;
+		want_data_hash = G->track_texture_updates == 1;
+
+		((ID3D11Texture2D *)resource)->GetDesc(&desc);
+	LeaveCriticalSection(&G->mCriticalSection);
+
+	if (!want_lod && !want_data_hash)
+		return;
+
+	// A multisampled resource cannot be copied into a staging texture. Leaving no
+	// hash is the honest answer; a wrong one would be worse. Cleared so the
+	// doomed attempt is not repeated on every check.
+	if (desc.SampleDesc.Count > 1) {
+		ClearTexture2DHashesDirty(resource);
+		return;
+	}
+
+	// Also returns null for an untyped/typeless format, which D3D will not let us
+	// create as a staging resource at all.
+	staging = context->GetStagingTexture2D(desc);
+	if (!staging) {
+		ClearTexture2DHashesDirty(resource);
+		return;
+	}
+
+	orig_context = context->GetPassThroughOrigContext1();
+	count = Texture2DSubresourceCount(&desc);
+	mip_levels = max(desc.MipLevels, 1);
+	crcs.assign(count, 0);
+
+	for (subresource = 0; subresource < count; subresource++) {
+		D3D11_MAPPED_SUBRESOURCE mapped;
+		HRESULT hr;
+
+		orig_context->CopySubresourceRegion(staging, subresource, 0, 0, 0,
+				resource, subresource, NULL);
+
+		hr = orig_context->Map(staging, subresource, D3D11_MAP_READ, 0, &mapped);
+		if (FAILED(hr)) {
+			// Leave the resource dirty so a later check retries, rather than
+			// caching a result that only covers the subresources read so far.
+			LogInfo("EnsureTexture2DHashes: Map(subresource %u) failed hr=0x%08X\n", subresource, hr);
+			goto out_profile;
+		}
+
+		if (want_lod)
+			crcs[subresource] = CalcSubresourceHash(&desc, subresource % mip_levels,
+					mapped.pData, mapped.RowPitch);
+
+		if (subresource == 0 && want_data_hash)
+			UpdateResourceHashFromCPU(resource, mapped.pData, mapped.RowPitch, mapped.DepthPitch);
+
+		orig_context->Unmap(staging, subresource);
+	}
+
+	// The resource may have been released and another created at the same address
+	// while the readback was in flight, so the handle info is looked up again
+	// rather than reusing the pointer taken above.
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+		info = GetResourceHandleInfo(resource);
+		if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+			if (want_lod) {
+				info->lod_hashes = std::move(crcs);
+				// Bumped so the cached lod_hash candidate list is rebuilt from the
+				// subresources just hashed.
+				info->lod_candidate_generation++;
+			}
+			info->texture_hashes_dirty = false;
+		}
+	LeaveCriticalSection(&G->mCriticalSection);
+
+out_profile:
+	if (Profiling::mode == Profiling::Mode::SUMMARY)
+		Profiling::end(&profiling_state, &Profiling::hash_tracking_overhead);
 }
 
 // Must be called with the critical section held to protect mResources against
@@ -1191,79 +1428,6 @@ out_unlock:
 		Profiling::end(&profiling_state, &Profiling::hash_tracking_overhead);
 }
 
-void PropagateResourceHash(ID3D11Resource *dst, ID3D11Resource *src)
-{
-	ResourceHandleInfo *dst_info, *src_info;
-	D3D11_RESOURCE_DIMENSION dim;
-	D3D11_TEXTURE2D_DESC *desc2D;
-	D3D11_TEXTURE3D_DESC *desc3D;
-	uint32_t old_data_hash, old_hash;
-	Profiling::State profiling_state;
-
-	if (Profiling::mode == Profiling::Mode::SUMMARY)
-		Profiling::start(&profiling_state);
-
-	EnterCriticalSectionPretty(&G->mCriticalSection);
-
-	dst_info = GetResourceHandleInfo(dst);
-	if (!dst_info)
-		goto out_unlock;
-
-	if (!supports_hash_tracking(dst_info))
-		goto out_unlock;
-
-	src_info = GetResourceHandleInfo(src);
-	if (!src_info)
-		goto out_unlock;
-
-	// If there was no initial data in either source or destination, or
-	// they both contain the same data, we don't need to recalculate the
-	// hash as it will not change:
-	if (src_info->data_hash == dst_info->data_hash)
-		goto out_unlock;
-
-	// XXX: If the destination had an initial data but the source did not
-	// we will currently discard the data part of the hash - is that the
-	// best thing to do, or should we leave the destination untouched? I'm
-	// going on the assumption that we care more about what the hash
-	// represents *now* rather than when it was created and if a texture is
-	// being dynamically updated by the GPU it doesn't make sense to use
-	// the initial data hash... but I'm not certain that will be the best
-	// decision for every game... We could always make it an option in the
-	// d3dx.ini if need be...
-
-	old_data_hash = dst_info->data_hash;
-	old_hash = dst_info->hash;
-
-	dst_info->data_hash = src_info->data_hash;
-
-	dst->GetType(&dim);
-	switch (dim) {
-		case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
-			desc2D = &dst_info->desc2D;
-			// TODO: tex2D->GetDesc(&desc2D); then fix up mip-maps if necessary
-
-			dst_info->hash = CalcTexture2DDescHash(dst_info->data_hash, desc2D);
-			break;
-		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
-			desc3D = &dst_info->desc3D;
-			// TODO: tex3D->GetDesc(&desc3D); then fix up mip-maps if necessary
-
-			dst_info->hash = CalcTexture3DDescHash(dst_info->data_hash, desc3D);
-			break;
-	}
-
-	LogDebug("Propagated resource hash\n");
-	LogDebug("  old data: %08x new data: %08x\n", old_data_hash, dst_info->data_hash);
-	LogDebug("  old hash: %08x new hash: %08x\n", old_hash, dst_info->hash);
-
-out_unlock:
-	LeaveCriticalSection(&G->mCriticalSection);
-
-	if (Profiling::mode == Profiling::Mode::SUMMARY)
-		Profiling::end(&profiling_state, &Profiling::hash_tracking_overhead);
-}
-
 bool MapTrackResourceHashUpdate(ID3D11Resource *pResource, UINT Subresource)
 {
 	if (G->hunting && G->track_texture_updates != 2) { // Any hunting mode - want to catch hash contamination even while soft disabled
@@ -1512,6 +1676,12 @@ void InvalidateTextureOverrideCandidates()
 		entry.second.texture_override_candidates_valid = false;
 		entry.second.texture_override_candidates.hash_matches = NULL;
 		entry.second.texture_override_candidates.fuzzy_matches.clear();
+		entry.second.texture_override_candidates.lod_hash_matches.clear();
+		// Force a rebuild of the lod_hash list on the next lookup, as the
+		// sections it points at are about to be discarded and rebuilt. Bumping
+		// the generation rather than clearing the cached generation is what
+		// makes the lookup notice.
+		entry.second.lod_candidate_generation++;
 	}
 
 	LeaveCriticalSection(&G->mResourcesLock);
@@ -1553,6 +1723,32 @@ TextureOverrideCandidates* get_texture_override_candidates(ID3D11Resource *resou
 		}
 
 		handle_info->texture_override_hash = handle_info->hash;
+	}
+
+	// Tracked separately from the hash list above because it is invalidated by
+	// mips streaming in, not by the resource hash changing. Without this a
+	// texture created empty would never pick up its lod_hash sections, as the
+	// empty vector would be cached before any mip arrived.
+	if (G->mTextureOverrideLodMap &&
+			handle_info->texture_override_lod_generation != handle_info->lod_candidate_generation) {
+		candidates->lod_hash_matches.clear();
+
+		for (uint32_t lod_hash : handle_info->lod_hashes) {
+			// A zero entry means that subresource has no known contents - either
+			// not streamed in yet, or dropped by a partial update. It must never
+			// match, or an empty texture would match a `lod_hash = 0` section.
+			if (!lod_hash)
+				continue;
+
+			TextureOverrideMap::iterator i = G->mTextureOverrideLodMap->find(lod_hash);
+			if (i == G->mTextureOverrideLodMap->end())
+				continue;
+
+			for (TextureOverride &to : i->second)
+				candidates->lod_hash_matches.push_back(&to);
+		}
+
+		handle_info->texture_override_lod_generation = handle_info->lod_candidate_generation;
 	}
 
 	return candidates;
@@ -1659,6 +1855,10 @@ void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverri
 				if (to.filter.matches_draw_conditions(call_info))
 					matches->push_back(&to);
 			}
+		}
+		for (TextureOverride *to : candidates->lod_hash_matches) {
+			if (to->filter.matches_draw_conditions(call_info))
+				matches->push_back(to);
 		}
 		for (TextureOverride *to : candidates->fuzzy_matches) {
 			if (to->filter.matches_draw_conditions(call_info))

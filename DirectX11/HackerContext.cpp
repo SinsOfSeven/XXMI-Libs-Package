@@ -101,6 +101,10 @@ HackerContext::~HackerContext()
 		if (buffer)
 			buffer->Release();
 	});
+
+	for (auto &entry : mStagingTextures)
+		entry.texture->Release();
+	mStagingTextures.clear();
 }
 
 // Save the corresponding HackerDevice, as we need to use it periodically to get
@@ -823,6 +827,58 @@ ID3D11Buffer* HackerContext::GetReadbackBuffer(UINT size)
 	return buffer;
 }
 
+ID3D11Texture2D* HackerContext::GetStagingTexture2D(const D3D11_TEXTURE2D_DESC &desc)
+{
+	// A staging resource must be readable by the CPU and must not be bound for
+	// rendering or shader access. It also cannot be multisampled - a multisampled
+	// resource has to be resolved first, which the caller checks for before
+	// getting here.
+	D3D11_TEXTURE2D_DESC staging_desc = desc;
+	staging_desc.Usage = D3D11_USAGE_STAGING;
+	staging_desc.BindFlags = 0;
+	staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	staging_desc.MiscFlags = 0;
+	staging_desc.SampleDesc.Count = 1;
+	staging_desc.SampleDesc.Quality = 0;
+
+	// The fields that determine the resource's allocation and subresource layout.
+	// The rest (usage, bind, cpu access, misc) are forced above, so they cannot
+	// differ between a cached entry and a new request.
+	auto same_shape = [](const D3D11_TEXTURE2D_DESC &a, const D3D11_TEXTURE2D_DESC &b) {
+		return a.Width == b.Width && a.Height == b.Height &&
+			a.MipLevels == b.MipLevels && a.ArraySize == b.ArraySize &&
+			a.Format == b.Format;
+	};
+
+	for (auto &entry : mStagingTextures) {
+		if (same_shape(entry.desc, staging_desc))
+			return entry.texture;
+	}
+
+	ID3D11Texture2D* texture = nullptr;
+
+	LockResourceCreationMode();
+	HRESULT hr = mOrigDevice1->CreateTexture2D(&staging_desc, nullptr, &texture);
+	UnlockResourceCreationMode();
+
+	if (FAILED(hr))
+	{
+		// Expected for a typeless format, which D3D will not allow as a staging
+		// resource. Logged at debug rather than as a warning: it is a format the
+		// caller simply cannot read back, not a misconfiguration.
+		LogDebug("GetStagingTexture2D: CreateTexture2D failed hr=0x%08X format=%d %ux%u mips=%u\n",
+				hr, (int)desc.Format, desc.Width, desc.Height, desc.MipLevels);
+		return nullptr;
+	}
+
+	LogDebug("GetStagingTexture2D: Created staging texture %ux%u format=%d mips=%u\n",
+			desc.Width, desc.Height, (int)desc.Format, desc.MipLevels);
+
+	mStagingTextures.push_back({ staging_desc, texture });
+
+	return texture;
+}
+
 void HackerContext::DeferInputLayoutOverride(HackerInputLayout* pInputLayout)
 {
 	LogDebug("HackerContext::DeferInputLayoutOverride(%s@%p) called pInputLayout=%p\n", type_name(this), this, pInputLayout);
@@ -1390,7 +1446,16 @@ void HackerContext::TrackAndDivertMap(HRESULT map_hr, ID3D11Resource *pResource,
 			// all these IO mapped addresses, but not sure about
 			// performance or if there might be any unintended
 			// consequences like uninitialised data:
-			divert = track = MapTrackResourceHashUpdate(pResource, Subresource);
+			divert = MapTrackResourceHashUpdate(pResource, Subresource);
+			// Record *any* writable map when LOD hashing is enabled, not just the
+			// subresource 0 / track_texture_updates case the divert path cares
+			// about. Unmap is where a resource gets flagged stale, and a streamed
+			// texture is usually written one subresource at a time, so the flag
+			// would never be set if only subresource 0 was tracked here.
+			//
+			// This only records the mapping: an entry whose orig_pData stays null
+			// is not diverted, and the guard below skips the divert path for it.
+			track = divert || G->track_lod_hashes || G->track_lod_hash_updates;
 			break;
 
 		case D3D11_MAP_READ:
@@ -1510,8 +1575,16 @@ void HackerContext::TrackAndDivertUnmap(ID3D11Resource *pResource, UINT Subresou
 	if ((map_info->bind_flags & (D3D11_BIND_FLAG)G->cache_resource_data) != 0)
 		UpdateResourceDataCacheFromMap(pResource, map_info->map.pData, map_info->size, &deallocate_diverted_memory);
 
-	if (G->track_texture_updates == 1 && Subresource == 0 && map_info->mapped_writable)
-		UpdateResourceHashFromCPU(pResource, map_info->map.pData, map_info->map.RowPitch, map_info->map.DepthPitch);
+	// A writable unmap can have changed the contents, so flag the tracked hashes
+	// stale. This costs a lock and a flag; the readback and CRC wait for
+	// EnsureTexture2DHashes at checktextureoverride, so a texture the game maps
+	// every frame is only rehashed if a mod actually asks about the slot.
+	//
+	// Subresource is not tested here even though the old CPU path only handled
+	// subresource 0: a write to any mip can change what a lod_hash section should
+	// match, and the on-demand path rehashes the whole resource regardless.
+	if (map_info->mapped_writable && (G->track_lod_hashes || G->track_texture_updates == 1))
+		MarkTexture2DHashesDirty(pResource);
 
 	if (map_info->orig_pData) {
 		// TODO: Measure performance vs. not diverting:
@@ -2020,14 +2093,18 @@ STDMETHODIMP_(void) HackerContext::CopySubresourceRegion(THIS_
 	 mOrigContext1->CopySubresourceRegion(pDstResource, DstSubresource, replaceDstX, DstY, DstZ,
 		pSrcResource, SrcSubresource, pSrcBox);
 
-	// We only update the destination resource hash when the entire
-	// subresource 0 is updated and pSrcBox is NULL. We could check if the
-	// pSrcBox fills the entire resource, but if the game is using pSrcBox
-	// it stands to reason that it won't always fill the entire resource
-	// and the hashes might be less predictable. Possibly something to
-	// enable as an option in the future if there is a proven need.
-	if (G->track_texture_updates == 1 && DstSubresource == 0 && DstX == 0 && DstY == 0 && DstZ == 0 && pSrcBox == NULL)
-		PropagateResourceHash(pDstResource, pSrcResource);
+	// The destination's contents may have changed, so flag its tracked hashes
+	// stale. This covers both the per-subresource LOD CRCs and the resource-level
+	// data hash: whether the copy was whole or partial no longer matters, because
+	// the on-demand path rehashes the whole resource from its real contents, so
+	// there is no longer a case where a partial write leaves an entry that has to
+	// be dropped rather than trusted.
+	//
+	// CopySubresourceRegion is how a streamed texture usually gets its pixels - it
+	// is created empty, then filled a subresource at a time out of another
+	// resource - so this is the hook that makes those textures trackable at all.
+	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1)
+		MarkTexture2DHashesDirty(pDstResource);
 
 	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		CopySubresourceRegionCache(pSrcResource, pDstResource, DstX, pSrcBox);
@@ -2074,8 +2151,8 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 				NULL                    // pSrcBox (can be NULL to copy whole buffer)
 			);
 
-			if (G->track_texture_updates == 1)
-				PropagateResourceHash(pDstResource, pSrcResource);
+			if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1)
+				MarkTexture2DHashesDirty(pDstResource);
 
 			return;
 		}
@@ -2083,8 +2160,9 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 	
 	mOrigContext1->CopyResource(pDstResource, pSrcResource);
 
-	if (G->track_texture_updates == 1)
-		PropagateResourceHash(pDstResource, pSrcResource);
+	// Readback is deferred until a mod requests the updated hashes.
+	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1)
+		MarkTexture2DHashesDirty(pDstResource);
 }
 
 STDMETHODIMP_(void) HackerContext::UpdateSubresource(THIS_
@@ -2111,14 +2189,17 @@ STDMETHODIMP_(void) HackerContext::UpdateSubresource(THIS_
 	 mOrigContext1->UpdateSubresource(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch,
 		SrcDepthPitch);
 
-	// We only update the destination resource hash when the entire
-	// subresource 0 is updated and pDstBox is NULL. We could check if the
-	// pDstBox fills the entire resource, but if the game is using pDstBox
-	// it stands to reason that it won't always fill the entire resource
-	// and the hashes might be less predictable. Possibly something to
-	// enable as an option in the future if there is a proven need.
-	if (G->track_texture_updates == 1 && DstSubresource == 0 && pDstBox == NULL)
-		UpdateResourceHashFromCPU(pDstResource, pSrcData, SrcRowPitch, SrcDepthPitch);
+	// The contents may have changed, so flag the tracked hashes stale. This does
+	// *not* hash anything, even though the pixels happen to be right here: doing
+	// that would hash every update the game makes, including textures no mod ever
+	// asks about. The readback happens at checktextureoverride instead, driven by
+	// this flag, so the cost lands only on slots that are actually checked.
+	//
+	// Subresource is deliberately not considered. The on-demand path rehashes the
+	// whole resource from its real contents, so a partial pDstBox no longer leaves
+	// an entry that has to be dropped rather than trusted.
+	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1)
+		MarkTexture2DHashesDirty(pDstResource);
 }
 
 STDMETHODIMP_(void) HackerContext::CopyStructureCount(THIS_

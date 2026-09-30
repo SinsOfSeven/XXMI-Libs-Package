@@ -236,6 +236,52 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *re
 		if (orig_hash != hash)
 			fprintf(frame_analysis_log, " orig_hash=%08x", orig_hash);
 
+		// Report the per-subresource state, so a texture that was created empty
+		// and streamed in later can be identified and written up as a lod_hash=
+		// section without catching each mip in a separate analysis run.
+		//
+		// MipLevels is what the description claims, and populated is how many
+		// subresources actually have contents. The gap between them is the
+		// confusing part in practice: a texture routinely advertises 11 mips
+		// while holding data for one, and the description alone looks like a full
+		// chain. Dimensions are included so a capture shows the resolution of
+		// each mip that is really there.
+		const ResourceHandleInfo &resource_info = G->mResources.at(resource);
+		const std::vector<uint32_t> &lod_hashes = resource_info.lod_hashes;
+		if (!lod_hashes.empty()) {
+			size_t populated = 0;
+			for (uint32_t lod_hash : lod_hashes) {
+				if (lod_hash)
+					populated++;
+			}
+
+			fprintf(frame_analysis_log, " mip_levels=%u populated=%zu", max(resource_info.desc2D.MipLevels, 1u), populated);
+
+			// A zero entry means that subresource has no known contents yet -
+			// either not streamed in, or not yet read back by the on-demand path.
+			// Those print as a dash rather than being omitted, because the slot
+			// existing is the point: it is what shows the gap between the
+			// advertised mip count and the data actually present.
+			//
+			// The subresource index counts array slices as well as mips, so the
+			// mip within a slice is index % MipLevels. Dimensions are computed the
+			// same way the hashing path does, so a capture shows the resolution of
+			// each mip that is really there.
+			UINT mip_levels = max(resource_info.desc2D.MipLevels, 1);
+			bool first = true;
+			for (UINT i = 0; i < lod_hashes.size(); i++) {
+				UINT mip = i % mip_levels;
+				UINT width = max(resource_info.desc2D.Width >> mip, 1);
+				UINT height = max(resource_info.desc2D.Height >> mip, 1);
+
+				if (lod_hashes[i])
+					fprintf(frame_analysis_log, "%s lod_mip%u=%08x(%ux%u)", first ? "" : ",", i, lod_hashes[i], width, height);
+				else
+					fprintf(frame_analysis_log, "%s lod_mip%u=-(%ux%u)", first ? "" : ",", i, width, height);
+				first = false;
+			}
+		}
+
 		info = &G->mResourceInfo.at(orig_hash);
 		if (info->hash_contaminated) {
 			fprintf(frame_analysis_log, " hash_contamination=");

@@ -2330,6 +2330,18 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 		hash = CalcTexture2DDescHash(hash, pDesc);
 	LogDebug("  InitialData = %p, hash = %08lx\n", pInitialData, hash);
 
+	// Per-subresource CRCs, so a TextureOverride written against one mip level
+	// can be related to its sibling mips. Strictly additive - the hashes above
+	// are not affected, so existing fixes are unaffected either way.
+	//
+	// Captured here because pInitialData is only valid for the duration of this
+	// call. A texture created empty gets no use out of it, and is marked dirty
+	// below so the on-demand path picks it up once the game has streamed
+	// something in.
+	std::vector<uint32_t> lod_hashes;
+	if (G->track_lod_hashes)
+		lod_hashes = CalcTexture2DLodHashes(pDesc, pInitialData);
+
 	// Override custom settings?
 	pNewDesc = process_texture_override(hash, pDesc, &newDesc);
 
@@ -2350,8 +2362,26 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 			handle_info->hash = hash;
 			handle_info->orig_hash = hash;
 			handle_info->data_hash = data_hash;
-			if (pDesc)
-				memcpy(&handle_info->desc2D, pDesc, sizeof(D3D11_TEXTURE2D_DESC));
+		handle_info->lod_hashes = std::move(lod_hashes);
+		// A texture is only clean if every subresource it has was hashed at
+		// creation. Anything created empty, or created with only some mips
+		// populated, starts dirty so the on-demand path reads it back the first
+		// time a mod checks a slot it is bound to.
+		bool hashes_incomplete = handle_info->lod_hashes.empty();
+		for (uint32_t lod_hash : handle_info->lod_hashes) {
+			if (!lod_hash)
+				hashes_incomplete = true;
+		}
+		handle_info->texture_hashes_dirty = hashes_incomplete;
+		// Bumped so the lod_hash candidate list is built on first use. Both
+		// generations start at 0, so without this the first lookup would find them
+		// equal, treat the (empty) cache as valid, and never scan the hashes
+		// assigned just above. That only showed up for a texture loaded *after*
+		// startup, since reloading the config bumps the generation globally and
+		// masked it.
+		handle_info->lod_candidate_generation++;
+		if (pDesc)
+			memcpy(&handle_info->desc2D, pDesc, sizeof(D3D11_TEXTURE2D_DESC));
 		LeaveCriticalSection(&G->mResourcesLock);
 		EnterCriticalSectionPretty(&G->mCriticalSection);
 			if (G->hunting && pDesc) {

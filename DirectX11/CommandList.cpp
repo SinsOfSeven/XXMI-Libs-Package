@@ -10543,6 +10543,20 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 	if (!resource)
 		return;
 
+	// On-demand hashing.
+	//
+	// A texture the game streamed in or wrote to has its tracked hashes marked
+	// stale at the time of the write, not hashed then - hashing means a GPU
+	// readback, and there is no point paying for textures no mod ever asks about.
+	// This is the point where that deferred work happens: it refreshes the
+	// resource hash and the per-subresource LOD hashes, and does nothing at all
+	// once the resource is already current.
+	//
+	// Deliberately before the matching below, which reads both the resource hash
+	// and the LOD hashes. A no-op for anything that is not a Texture2D.
+	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1)
+		EnsureTexture2DHashes(state->mHackerContext, resource);
+
 	// For vertex and index buffers the game may pack multiple meshes into
 	// one buffer and bind them at different offsets. In that case the base
 	// resource hash alone is not enough – we must use the same region data hash 

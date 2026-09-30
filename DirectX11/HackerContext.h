@@ -148,6 +148,24 @@ private:
 
 	FlatHashMap<UINT, ID3D11Buffer*> mReadbackBuffers = FlatHashMap<UINT, ID3D11Buffer*>(64);
 
+	// Staging Texture2D pool for on-demand texture readback, keyed by texture
+	// shape (dimensions, mip and array counts, format) so resources of the same
+	// shape share one instead of each allocating its own. Released with the
+	// context. Texture-shaped rather than sized because a staging copy has to
+	// match the source's subresource layout exactly.
+	//
+	// Matched by comparing the description rather than by a synthetic key: a
+	// hashed key would risk two different shapes colliding and one resource being
+	// read back through another's staging texture, which would silently produce a
+	// wrong hash. The number of distinct shapes in a frame is small, so a linear
+	// scan is both safe and cheap.
+	struct StagingTexture
+	{
+		D3D11_TEXTURE2D_DESC desc;
+		ID3D11Texture2D *texture;
+	};
+	std::vector<StagingTexture> mStagingTextures;
+
 	// These private methods are utility routines for HackerContext.
 	void BeforeDraw(DrawContext &data);
 	void AfterDraw(DrawContext &data);
@@ -252,6 +270,7 @@ public:
 	void ResetCallCounters() { draw_number = 0; dispatch_number = 0; };
 
 	ID3D11Buffer* GetReadbackBuffer(UINT size);
+	ID3D11Texture2D* GetStagingTexture2D(const D3D11_TEXTURE2D_DESC &desc);
 
 	void DeferInputLayoutOverride(HackerInputLayout* pInputLayout);
 	void OverrideInputLayout();

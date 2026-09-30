@@ -492,6 +492,8 @@ struct Globals
 	ShaderHashType shader_hash_type;
 	bool track_region_hashes;
 	DataCacheBindFlags cache_resource_data = (DataCacheBindFlags)0;
+	bool track_lod_hashes;
+	bool track_lod_hash_updates;
 	bool track_implicit_index_buffers;
 	bool allow_buffer_resize;
 	int texture_hash_version;
@@ -600,6 +602,17 @@ struct Globals
 
 	ShaderOverrideMap mShaderOverrideMap;
 	TextureOverrideMap mTextureOverrideMap;
+
+	// [TextureOverride] sections registered under `lod_hash =` instead of
+	// `hash =`, keyed by the CRC of the texture's mip 0. These are matched
+	// against every subresource of a resource rather than its resource hash,
+	// which is what makes them work for textures that are created empty and
+	// streamed in later. Kept apart from mTextureOverrideMap because the two
+	// use different keys, and a streamed texture's resource hash is only a hash
+	// of its description, which collides between every texture of the same size.
+	//
+	// Null when no section uses lod_hash, so the common case costs one branch.
+	std::unique_ptr<TextureOverrideMap> mTextureOverrideLodMap;
 	FuzzyTextureOverrides mFuzzyTextureOverrides;
 
 	// [Filter<Name>] sections, keyed by lowercased full section id (mirrors
@@ -712,6 +725,8 @@ struct Globals
 
 		shader_hash_type(ShaderHashType::FNV),
 		track_region_hashes(false),
+		track_lod_hashes(false),
+		track_lod_hash_updates(false),
 		track_implicit_index_buffers(false),
 		allow_buffer_resize(true),
 		texture_hash_version(0),

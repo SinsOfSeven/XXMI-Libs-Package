@@ -3000,6 +3000,7 @@ static void ParseShaderRegexSections()
 // function. Used by ParseCommandList to find any unrecognised lines.
 wchar_t *TextureOverrideIniKeys[] = {
 	L"hash",
+	L"lod_hash",
 	L"format",
 	L"width",
 	L"height",
@@ -3640,7 +3641,9 @@ static void ParseTextureOverrideSections()
 	const wchar_t *id;
 	TextureOverride *override;
 	uint32_t hash;
+	uint32_t lod_hash;
 	bool found;
+	bool lod_hash_found;
 	map<uint32_t, int> max_byte_width_map;
 
 	// Lock entire routine, this can be re-inited.  These shaderoverrides
@@ -3650,6 +3653,7 @@ static void ParseTextureOverrideSections()
 
 	G->mTextureOverrideMap.clear();
 	G->mFuzzyTextureOverrides.clear();
+	G->mTextureOverrideLodMap.reset();
 	InvalidateTextureOverrideCandidates();
 
 	lower = ini_sections.lower_bound(wstring(L"TextureOverride"));
@@ -3660,36 +3664,72 @@ static void ParseTextureOverrideSections()
 
 		LogInfo("[%S]\n", id);
 
-		hash = (uint32_t)GetIniHash(id, L"Hash", 0, &found);
-		if (!found) {
-			if (texture_override_section_has_fuzzy_match_keys(id)) {
-				parse_texture_override_fuzzy_match(id);
-				continue;
-			}
+	hash = (uint32_t)GetIniHash(id, L"Hash", 0, &found);
 
-			IniWarningW(L"Section missing Hash= or valid match options\n - [%ls]\n", id);
+	// lod_hash = matches on a per-subresource CRC rather than the resource hash,
+	// so a texture that was created empty and streamed in later can still be
+	// targeted. It is a different kind of key, not a fuzzy description match, so
+	// it composes with match_* keys rather than excluding them.
+	lod_hash = (uint32_t)GetIniHash(id, L"Lod_Hash", 0, &lod_hash_found);
+	if (lod_hash_found && !lod_hash) {
+		IniWarningW(L"lod_hash= must not be 0 - a subresource with unknown contents is never matched\n - [%ls]\n", id);
+		lod_hash_found = false;
+	}
+
+	if (lod_hash_found)
+		G->mTextureOverrideLodMap = std::make_unique<TextureOverrideMap>();
+
+	// A section with neither key needs *some* way to identify a texture. lod_hash
+	// counts on its own here: it is a complete key in the same way hash= is, since
+	// a TextureOverride is matched against a resource's subresources rather than
+	// its description. Rejecting it because hash= is absent would make lod_hash=
+	// useless on its own, which is the normal case for a streamed texture - a
+	// mod targeting one rarely also wants to pin the resource hash.
+	if (!found && !lod_hash_found) {
+		if (texture_override_section_has_fuzzy_match_keys(id)) {
+			parse_texture_override_fuzzy_match(id);
 			continue;
 		}
 
-		if (texture_override_section_has_fuzzy_match_keys(id))
-			IniWarningW(L"Cannot use hash= and match options together!\n - [%ls]\n", id);
+		IniWarningW(L"Section missing Hash=, Lod_hash= or valid match options\n - [%ls]\n", id);
+		continue;
+	}
 
-		G->mTextureOverrideMap[hash].emplace_back(); // C++ gotcha: invalidates pointers into the vector
-		override = &G->mTextureOverrideMap[hash].back();
+	if (texture_override_section_has_fuzzy_match_keys(id))
+		IniWarningW(L"Cannot use hash= and match options together!\n - [%ls]\n", id);
+
+	if (lod_hash_found) {
+		// Both keys present would silently discard hash=, since the lod map is
+		// checked at a different point in the draw than the resource hash map. Say
+		// so rather than letting one key quietly do nothing.
+		if (found)
+			IniWarningW(L"hash= is ignored when lod_hash= is also set - the section matches on lod_hash only\n - [%ls]\n", id);
+
+		(*G->mTextureOverrideLodMap)[lod_hash].emplace_back();
+		override = &(*G->mTextureOverrideLodMap)[lod_hash].back();
 		override->ini_section = id;
 
 		// Important that we do *not* register the command lists yet:
 		parse_texture_override_common(id, override, false);
-
-		// Warn if same hash is used two or more times in sections that
-		// do not have a draw context match or match_priority:
-		warn_if_duplicate_texture_hash(override, hash);
-
-		// Record the largest `override_byte_width` value for the hash.
-		if (override->override_byte_width != -1) {
-			index_byte_width_override(override, hash, max_byte_width_map);
-		}
+		continue;
 	}
+
+	G->mTextureOverrideMap[hash].emplace_back(); // C++ gotcha: invalidates pointers into the vector
+	override = &G->mTextureOverrideMap[hash].back();
+	override->ini_section = id;
+
+	// Important that we do *not* register the command lists yet:
+	parse_texture_override_common(id, override, false);
+
+	// Warn if same hash is used two or more times in sections that
+	// do not have a draw context match or match_priority:
+	warn_if_duplicate_texture_hash(override, hash);
+
+	// Record the largest `override_byte_width` value for the hash.
+	if (override->override_byte_width != -1) {
+		index_byte_width_override(override, hash, max_byte_width_map);
+	}
+}
 
 	// Apply the largest per-hash buffer size overridesto all relevant TextureOverride sections.
 	update_byte_width_overrides(max_byte_width_map);
@@ -3719,6 +3759,20 @@ static void ParseTextureOverrideSections()
 		for (TextureOverride &to : tolkv.second) {
 			registered_command_lists.push_back(&to.command_list);
 			registered_command_lists.push_back(&to.post_command_list);
+		}
+	}
+
+	if (G->mTextureOverrideLodMap) {
+		// Same sorting and command list registration as mTextureOverrideMap
+		// above - without this the lod_hash sections would be matched but their
+		// commands would never run.
+		for (auto &tolkv : *G->mTextureOverrideLodMap) {
+			std::sort(tolkv.second.begin(), tolkv.second.end(), TextureOverrideLess);
+
+			for (TextureOverride &to : tolkv.second) {
+				registered_command_lists.push_back(&to.command_list);
+				registered_command_lists.push_back(&to.post_command_list);
+			}
 		}
 	}
 	LeaveCriticalSection(&G->mCriticalSection);
@@ -4863,6 +4917,8 @@ void LoadConfigFile()
 		G->cache_resource_data |= DataCacheBindFlags::CONSTANT_BUFFER;  // TODO: Remove after a grace period.
 	}
 
+	G->track_lod_hashes = GetIniBool(L"Rendering", L"track_lod_hashes", false, NULL);
+	G->track_lod_hash_updates = GetIniBool(L"Rendering", L"track_lod_hash_updates", false, NULL);
 	G->track_implicit_index_buffers = GetIniBool(L"Rendering", L"track_implicit_index_buffers", false, NULL);
 	G->allow_buffer_resize = GetIniBool(L"Rendering", L"allow_buffer_resize", true, NULL);
 	G->assemble_signature_comments = GetIniBool(L"Rendering", L"assemble_signature_comments", false, NULL);
