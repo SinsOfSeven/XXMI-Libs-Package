@@ -121,20 +121,26 @@ std::wstring Utf8ToWide(const uint8_t *data, size_t size)
 
 	// ZIP names are officially CP437 but virtually everything writes UTF-8;
 	// try UTF-8 first and fall back to the ANSI code page:
-	int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char*)data, (int)size, NULL, 0);
-	if (wlen == 0)
-		wlen = MultiByteToWideChar(CP_ACP, 0, (const char*)data, (int)size, NULL, 0);
+	UINT code_page = CP_UTF8;
+	int wlen = MultiByteToWideChar(code_page, MB_ERR_INVALID_CHARS, (const char*)data, (int)size, NULL, 0);
+	if (wlen == 0) {
+		code_page = CP_ACP;
+		wlen = MultiByteToWideChar(code_page, 0, (const char*)data, (int)size, NULL, 0);
+	}
 	if (wlen <= 0)
 		return L"";
 
 	std::wstring out(wlen, L'\0');
-	MultiByteToWideChar(CP_UTF8, 0, (const char*)data, (int)size, &out[0], wlen);
+	if (MultiByteToWideChar(code_page, 0, (const char*)data, (int)size, &out[0], wlen) != wlen)
+		return L"";
 	return out;
 }
 
 // Read a chunk of the archive starting at a byte exact offset:
-static bool ReadAt(HANDLE handle, LONGLONG pos, void *buffer, DWORD size)
+bool ZipArchive::ReadAt(LONGLONG pos, void *buffer, DWORD size) const
 {
+	std::lock_guard<std::mutex> lock(ioMutex);
+	HANDLE handle = (HANDLE)fileHandle;
 	LARGE_INTEGER li;
 	li.QuadPart = pos;
 	if (!SetFilePointerEx(handle, li, NULL, FILE_BEGIN))
@@ -179,7 +185,7 @@ bool ZipArchive::FindEndOfCentralDirectory()
 		scanSize = 65535 + 22;
 
 	std::vector<uint8_t> tail((size_t)scanSize);
-	if (!ReadAt((HANDLE)fileHandle, fileSize.QuadPart - scanSize, tail.data(), (DWORD)scanSize))
+	if (!ReadAt(fileSize.QuadPart - scanSize, tail.data(), (DWORD)scanSize))
 		return false;
 
 	for (LONGLONG i = scanSize - 22; i >= 0; i--) {
@@ -222,7 +228,7 @@ bool ZipArchive::ParseCentralDirectory()
 {
 	LONGLONG cdSize = eocdSize;
 	std::vector<uint8_t> cd((size_t)cdSize);
-	if (!ReadAt((HANDLE)fileHandle, eocdOffset, cd.data(), (DWORD)cdSize))
+	if (!ReadAt(eocdOffset, cd.data(), (DWORD)cdSize))
 		return false;
 
 	size_t pos = 0;
@@ -238,15 +244,17 @@ bool ZipArchive::ParseCentralDirectory()
 		}
 
 		DWORD method = ReadU16(p + 10);
-		DWORD crc32 = ReadU32(p + 16);
 		DWORD csize = ReadU32(p + 20);
 		DWORD usize = ReadU32(p + 24);
 		DWORD nameLen = ReadU16(p + 28);
 		DWORD extraLen = ReadU16(p + 30);
 		DWORD commentLen = ReadU16(p + 32);
 		DWORD localHeaderPos = ReadU32(p + 42);
+		size_t variable_len = (size_t)nameLen + extraLen + commentLen;
+		if (variable_len > cd.size() - (pos + 46))
+			return false;
 
-		if (HasZip64Marker(crc32) || HasZip64Marker(csize) || HasZip64Marker(usize) ||
+		if (HasZip64Marker(csize) || HasZip64Marker(usize) ||
 			HasZip64Marker(localHeaderPos)) {
 			LogWarningW(L"  Error opening archive %ls: ZIP64 archives are not supported (%ls)\n",
 				path.c_str(), Utf8ToWide(cd.data() + pos + 46, (size_t)nameLen).c_str());
@@ -255,11 +263,8 @@ bool ZipArchive::ParseCentralDirectory()
 
 		pos += 46;
 
-		if (pos + nameLen > cd.size())
-			return false;
-
 		std::wstring name = Utf8ToWide(cd.data() + pos, (size_t)nameLen);
-		pos += nameLen + extraLen + commentLen;
+		pos += variable_len;
 
 		if (name.empty())
 			continue;
@@ -311,7 +316,7 @@ bool ZipArchive::ReadEntry(const ArchiveEntry &entry, std::vector<uint8_t> &out)
 
 	// Read and validate the local file header so we can locate the data:
 	uint8_t lh[30];
-	if (!ReadAt((HANDLE)fileHandle, entry.localHeaderPos, lh, sizeof(lh))) {
+	if (!ReadAt(entry.localHeaderPos, lh, sizeof(lh))) {
 		LogWarningW(L"  Error reading %s from archive %ls: could not read local header\n", entry.name.c_str(), path.c_str());
 		return false;
 	}
@@ -334,7 +339,7 @@ bool ZipArchive::ReadEntry(const ArchiveEntry &entry, std::vector<uint8_t> &out)
 
 	if (entry.compressedSize > 0) {
 		compressed.resize(entry.compressedSize);
-		if (!ReadAt((HANDLE)fileHandle, dataPos, compressed.data(), entry.compressedSize)) {
+		if (!ReadAt(dataPos, compressed.data(), entry.compressedSize)) {
 			LogWarningW(L"  Error reading %s from archive %ls: could not read data\n", entry.name.c_str(), path.c_str());
 			return false;
 		}

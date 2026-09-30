@@ -5,6 +5,7 @@
 #include <memory>
 #include <unordered_map>
 #include <functional>
+#include <mutex>
 
 // A single entry in a ZIP archive, decoded from the central directory.
 struct ArchiveEntry {
@@ -36,9 +37,11 @@ public:
 private:
 	bool FindEndOfCentralDirectory();
 	bool ParseCentralDirectory();
+	bool ReadAt(LONGLONG pos, void *buffer, DWORD size) const;
 
 	std::wstring path;
 	void *fileHandle;                       // HANDLE (kept as void* to avoid header order issues)
+	mutable std::mutex ioMutex;             // Protects the shared file position and read
 	LONGLONG eocdOffset;                    // Central directory offset
 	LONGLONG eocdSize;                      // Central directory size
 	DWORD entryCount;                       // Entries in the archive
