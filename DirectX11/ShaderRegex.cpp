@@ -3,6 +3,7 @@
 #include "BlobStore.h"
 #include "ShaderBytecodeValidation.h"
 #include "CommandList.h"
+#include "Overlay.h"
 #include "globals.h" // For ShaderOverride FIXME: This should be in a separate header
 #include "log.h"
 
@@ -50,10 +51,10 @@ static void log_pcre2_error_nonl(int err, char *fmt, ...)
 	pcre2_get_error_message(err, buf, sizeof(buf));
 
 	va_start(ap, fmt);
-	vLogInfo(fmt, ap);
+	vLogWarning(fmt, ap);
 	va_end(ap);
 
-	LogInfo(": %s\n", buf);
+	LogWarning(": %s\n", buf);
 }
 
 static bool get_shader_model(std::string *asm_text, std::string *shader_model)
@@ -81,7 +82,7 @@ static bool find_dcl_end(std::string *asm_text, size_t *dcl_end_pos)
 	*dcl_end_pos = asm_text->find("\n", *dcl_end_pos + 1);
 
 	if (*dcl_end_pos == std::string::npos) {
-		LogInfo("WARNING: Unable to locate end of shader declarations!\n");
+		LogWarning("Unable to locate end of shader declarations while applying ShaderRegex edits\n");
 		return false;
 	}
 
@@ -134,7 +135,7 @@ static unsigned get_dcl_temps(std::string *asm_text)
 		return 0;
 
 	tmp_regs = stoul(asm_text->substr(dcl_temps + 10, 4));
-	LogInfo("Found dcl_temps %d\n", tmp_regs);
+	LogDebug("Found dcl_temps %d\n", tmp_regs);
 
 	return tmp_regs;
 }
@@ -147,7 +148,7 @@ static bool update_dcl_temps(std::string *asm_text, size_t new_val)
 	if (find_dcl_temps(asm_text, &dcl_temps)) {
 		dcl_temps += 11;
 		dcl_temps_end = asm_text->find("\n", dcl_temps);
-		LogInfo("Updating dcl_temps %Iu\n", new_val);
+		LogDebug("Updating dcl_temps %Iu\n", new_val);
 		asm_text->replace(dcl_temps, dcl_temps_end - dcl_temps, std::to_string(new_val));
 		return true;
 	}
@@ -156,7 +157,7 @@ static bool update_dcl_temps(std::string *asm_text, size_t new_val)
 		return false;
 
 	insert_str = std::string("\ndcl_temps ") + std::to_string(new_val);
-	LogInfo("Inserting dcl_temps %Iu\n", new_val);
+	LogDebug("Inserting dcl_temps %Iu\n", new_val);
 	asm_text->insert(dcl_end, insert_str);
 	dcl_end += insert_str.size();
 
@@ -326,11 +327,11 @@ bool ShaderRegexPattern::patch(std::string *asm_text, ShaderRegexTemps *temp_reg
 			buf, &output_size);
 
 	if (rc == PCRE2_ERROR_NOMEMORY) {
-		LogInfo("  NOTICE: regex replace requires a %u byte buffer\n", (unsigned)output_size);
-		LogInfo("  NOTICE: We underestimated by %u bytes and have to start over\n", (unsigned)(output_size - est_size));
-		LogInfo("  NOTICE: What kind of crazy are you doing to get down this code path?\n");
-		LogInfo("  NOTICE: You didn't inject a matrix inverse or two in assembly did you?\n");
-		LogInfo("  NOTICE: Once more, with passion!\n");
+		LogWarning("  NOTICE: regex replace requires a %u byte buffer\n", (unsigned)output_size);
+		LogWarning("  NOTICE: We underestimated by %u bytes and have to start over\n", (unsigned)(output_size - est_size));
+		LogWarning("  NOTICE: What kind of crazy are you doing to get down this code path?\n");
+		LogWarning("  NOTICE: You didn't inject a matrix inverse or two in assembly did you?\n");
+		LogWarning("  NOTICE: Once more, with passion!\n");
 
 		delete [] buf;
 		buf = new PCRE2_UCHAR[output_size];
@@ -842,7 +843,7 @@ bool ShaderRegexCacheStore::create_metadata()
 		return false;
 	}
 
-	LogWarning("ShaderRegexCache: cache created at %S (generation %08x)\n", dat_path, shader_regex_hash);
+	LogInfo("ShaderRegexCache: cache created at %S (generation %08x)\n", dat_path, shader_regex_hash);
 	return true;
 }
 
@@ -856,8 +857,12 @@ bool ShaderRegexCacheStore::create_metadata()
 bool ShaderRegexCacheStore::ensure_valid(bool create_if_missing, ShaderRegexCacheFailureReason *reason)
 {
 	wchar_t dat_path[MAX_PATH], blob_path[MAX_PATH];
+	ShaderRegexCacheFailureReason local_reason = ShaderRegexCacheFailureReason::NONE;
+	ShaderRegexCacheFailureReason *failure_reason = reason ? reason : &local_reason;
 
 	shader_regex_cache_get_paths(dat_path, blob_path);
+	const bool metadata_exists = GetFileAttributesW(dat_path) != INVALID_FILE_ATTRIBUTES;
+	*failure_reason = ShaderRegexCacheFailureReason::NONE;
 	if (blob.set_path(blob_path))
 		reset_state();
 	metadata_path = dat_path;
@@ -872,8 +877,7 @@ bool ShaderRegexCacheStore::ensure_valid(bool create_if_missing, ShaderRegexCach
 
 		if (!create_if_missing) {
 			reset_state();
-			if (reason)
-				*reason = ShaderRegexCacheFailureReason::STALE_GENERATION;
+			*failure_reason = ShaderRegexCacheFailureReason::STALE_GENERATION;
 			return false;
 		}
 
@@ -882,20 +886,17 @@ bool ShaderRegexCacheStore::ensure_valid(bool create_if_missing, ShaderRegexCach
 
 	if (!metadata_load(dat_path)) {
 		reset_state();
-		if (reason)
-			*reason = ShaderRegexCacheFailureReason::CORRUPT_METADATA;
+		*failure_reason = ShaderRegexCacheFailureReason::CORRUPT_METADATA;
 	} else if (header.shader_regex_hash != shader_regex_hash) {
 		reset_state();
-		if (reason)
-			*reason = ShaderRegexCacheFailureReason::STALE_GENERATION;
+		*failure_reason = ShaderRegexCacheFailureReason::STALE_GENERATION;
 	} else if (!validate_blob()) {
 		reset_state();
-		if (reason)
-			*reason = ShaderRegexCacheFailureReason::CORRUPT_METADATA;
+		*failure_reason = ShaderRegexCacheFailureReason::CORRUPT_METADATA;
 	} else {
 		blob.set_logical_end(header.blob_size);
 		loaded = true;
-		LogWarning("ShaderRegexCache: loaded %u records from %S (blob %Iu, generation %08x)\n",
+		LogInfo("ShaderRegexCache: loaded %u records from %S (blob %Iu, generation %08x)\n",
 				(unsigned)records.size(), dat_path, (uint64_t)header.blob_size, header.shader_regex_hash);
 		return true;
 	}
@@ -903,8 +904,12 @@ bool ShaderRegexCacheStore::ensure_valid(bool create_if_missing, ShaderRegexCach
 	if (!create_if_missing)
 		return false;
 
-	LogWarning("ShaderRegexCache: %S not present or invalid for generation %08x, (re)creating\n",
-			dat_path, shader_regex_hash);
+	if (metadata_exists && *failure_reason == ShaderRegexCacheFailureReason::CORRUPT_METADATA)
+		LogWarning("ShaderRegexCache: invalid cache %S, recreating for generation %08x\n",
+				dat_path, shader_regex_hash);
+	else
+		LogInfo("ShaderRegexCache: cache not present or stale at %S; creating generation %08x\n",
+				dat_path, shader_regex_hash);
 	wipe_files();
 
 	return create_metadata();
@@ -981,7 +986,7 @@ ShaderRegexCache ShaderRegexCacheStore::load(UINT64 hash, const wchar_t *shader_
 		uint32_t match_id = match_pool[record->match_pool_index + i];
 		group = shader_regex_group_index[match_id];
 
-		LogWarning("ShaderRegexCache: %S %016I64x matches [%S]\n",
+		LogDebug("ShaderRegexCache: %S %016I64x matches [%S]\n",
 				shader_type, hash, group->ini_section.c_str());
 
 		if (record->patched && tagline)
@@ -1009,13 +1014,13 @@ static void shader_regex_cache_export_fixed(UINT64 hash, const wchar_t *shader_t
 
 	if (!patched) {
 		if (DeleteFile(path))
-			LogInfo("  Removed stale ShaderRegex assembly file %S\n", path);
+			LogDebug("Removed stale ShaderRegex assembly file %S\n", path);
 		return;
 	}
 
 	wfopen_ensuring_access(&f, path, L"wb");
 	if (!f) {
-		LogInfo("  Error storing ShaderRegex assembly to %S\n", path);
+		LogWarning("Error storing ShaderRegex assembly to %S\n", path);
 		return;
 	}
 
@@ -1023,7 +1028,7 @@ static void shader_regex_cache_export_fixed(UINT64 hash, const wchar_t *shader_t
 	fwrite(asm_text->c_str(), 1, asm_text->size(), f);
 
 	fclose(f);
-	LogInfo("  Storing ShaderRegex assembly to %S\n", path);
+	LogDebug("Storing ShaderRegex assembly to %S\n", path);
 }
 
 // Two independent concerns, in two phases. The cache bookkeeping below commits
@@ -1091,7 +1096,7 @@ void ShaderRegexCacheStore::save_meta(UINT64 hash, const wchar_t *shader_type, v
 			match_pool.insert(match_pool.end(), match_ids->begin(), match_ids->end());
 		}
 
-		LogWarning("ShaderRegexCache: save_meta %S %016I64x record updated (matches=%u pool_total=%u patched=%d)\n",
+		LogDebug("ShaderRegexCache: save_meta %S %016I64x record updated (matches=%u pool_total=%u patched=%d)\n",
 				shader_type, hash, (unsigned)record->match_count, (unsigned)match_pool.size(), (int)patched);
 
 		// Defer the disk write until the per-frame flush so we don't block
@@ -1140,8 +1145,9 @@ void ShaderRegexCacheStore::save_bin(UINT64 hash, const wchar_t *shader_type, ve
 	uint32_t dxbc_version;
 	if (!shader_bytecode_dxbc_version(bytecode->data(), bytecode->size(), &dxbc_version)
 	 || shader_stage_from_dxbc_type(dxbc_version >> 16) != stage) {
-		LogWarning("ShaderRegexCache: save_bin %S %016I64x skipped - assembled output is not valid %S bytecode\n",
-				shader_type, hash, shader_type);
+		LogOverlayW(LOG_WARNING,
+			L"ShaderRegex output for %016I64x-%ls failed bytecode container or stage validation; cache entry skipped\n",
+			hash, shader_type);
 		return;
 	}
 
@@ -1157,7 +1163,7 @@ void ShaderRegexCacheStore::save_bin(UINT64 hash, const wchar_t *shader_type, ve
 	record->patched = 1;
 	header.blob_size = blob.logical_end();
 
-	LogWarning("ShaderRegexCache: save_bin %S %016I64x at blob offset %Iu (%u bytes, logical end %Iu)\n",
+	LogDebug("ShaderRegexCache: save_bin %S %016I64x at blob offset %Iu (%u bytes, logical end %Iu)\n",
 			shader_type, hash, (uint64_t)blob_offset, (unsigned)bytecode->size(), (uint64_t)header.blob_size);
 
 	// Defer the disk write until the per-frame flush:
@@ -1292,7 +1298,7 @@ void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::
 		match_ids.push_back(j);
 		match_groups.push_back(group);
 
-		LogInfo("ShaderRegex (no pattern): %S %016I64x matches [%S]\n", shader_type, hash, group->ini_section.c_str());
+		LogDebug("ShaderRegex (no pattern): %S %016I64x matches [%S]\n", shader_type, hash, group->ini_section.c_str());
 	}
 
 	// If no ShaderRegEx requires decompilation, link CommandLists and update shader cache here instead of `apply_shader_regex_groups`. 
@@ -1333,7 +1339,7 @@ bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type
 			if (!match)
 				continue;
 
-			LogInfo("ShaderRegex: %s %016I64x matches [%S]\n", shader_model->c_str(), hash, group->ini_section.c_str());
+			LogDebug("ShaderRegex: %s %016I64x matches [%S]\n", shader_model->c_str(), hash, group->ini_section.c_str());
 			patched = patched || patch;
 
 			// Append section to patch sequence.
