@@ -10242,6 +10242,10 @@ void ResourceCopyTarget::SetResource(
 
 	case ResourceCopyTargetType::COPY_RESOURCE_DST:
 		if (state->copy_dst_resource) {
+			// The command that supplied res releases its reference when it exits.
+			// Keep one for the hook argument until CopyResourceArgumentGuard runs.
+			if (res)
+				res->AddRef();
 			if (*state->copy_dst_resource)
 				(*state->copy_dst_resource)->Release();
 			*state->copy_dst_resource = res;
@@ -10253,6 +10257,8 @@ void ResourceCopyTarget::SetResource(
 
 	case ResourceCopyTargetType::COPY_RESOURCE_SRC:
 		if (state->copy_src_resource) {
+			if (res)
+				res->AddRef();
 			if (*state->copy_src_resource)
 				(*state->copy_src_resource)->Release();
 			*state->copy_src_resource = res;
