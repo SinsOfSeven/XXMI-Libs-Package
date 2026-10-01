@@ -28,6 +28,7 @@
 // Guard against pathological zips / decompression bombs. Configurable via
 // [System] max_archive_entry_size (default 64 MiB).
 static size_t max_archive_entry_size = 64U * 1024U * 1024U;
+static constexpr size_t max_archive_directory_size = 64U * 1024U * 1024U;
 
 void SetMaxArchiveEntrySize(size_t bytes)
 {
@@ -92,6 +93,26 @@ static std::wstring NormalizePath(const std::wstring &in)
 			c += L'a' - L'A';
 	}
 	return out;
+}
+
+// An entry is a path relative to its archive's mount directory. Reject names
+// that could escape that directory or resolve differently as a Windows path.
+static bool SafeEntryName(const std::wstring &name)
+{
+	if (name.empty() || name.front() == L'\\' || name.find(L':') != std::wstring::npos ||
+		name.find(L'\0') != std::wstring::npos)
+		return false;
+	for (size_t start = 0; start < name.size();) {
+		size_t end = name.find(L'\\', start);
+		if (end == std::wstring::npos)
+			end = name.size();
+		size_t length = end - start;
+		if (!length || (length == 1 && name[start] == L'.') ||
+			(length == 2 && name[start] == L'.' && name[start + 1] == L'.'))
+			return false;
+		start = end + 1;
+	}
+	return name.back() != L'\\';
 }
 
 // Directory of the DLL (the "3DMigoto path"), always with a trailing '\':
@@ -200,14 +221,17 @@ bool ZipArchive::FindEndOfCentralDirectory()
 		DWORD cdOffset = ReadU32(p + 16);
 		DWORD cdSize = ReadU32(p + 12);
 
-		if (HasZip64Marker(cdOffset) || HasZip64Marker(cdSize)) {
+		if (HasZip64Marker(cdOffset) || HasZip64Marker(cdSize) ||
+			ReadU16(p + 10) == 0xFFFF) {
 			LogWarningW(L"  Error opening archive %ls: ZIP64 archives are not supported\n", path.c_str());
 			return false;
 		}
+		if (ReadU16(p + 4) || ReadU16(p + 6) || ReadU16(p + 8) != ReadU16(p + 10)) {
+			LogWarningW(L"  Error opening archive %ls: multi-disk ZIP archives are not supported\n", path.c_str());
+			return false;
+		}
 
-		// Store via members for ParseCentralDirectory: we stash these in the
-		// entry count by re-mapping. Use a small static side channel instead:
-		// keep them in the class via a struct we define below.
+		// ParseCentralDirectory reads these bounds from the archive object.
 		eocdOffset = (LONGLONG)cdOffset;
 		eocdSize = (LONGLONG)cdSize;
 		entryCount = ReadU16(p + 10);
@@ -227,6 +251,10 @@ bool ZipArchive::FindEndOfCentralDirectory()
 bool ZipArchive::ParseCentralDirectory()
 {
 	LONGLONG cdSize = eocdSize;
+	if (cdSize < 0 || (uint64_t)cdSize > max_archive_directory_size) {
+		LogWarningW(L"  Error opening archive %ls: central directory too large\n", path.c_str());
+		return false;
+	}
 	std::vector<uint8_t> cd((size_t)cdSize);
 	if (!ReadAt(eocdOffset, cd.data(), (DWORD)cdSize))
 		return false;
@@ -270,16 +298,18 @@ bool ZipArchive::ParseCentralDirectory()
 			continue;
 
 		ArchiveEntry entry;
-		bool isDir = name.back() == L'/';
+		bool isDir = name.back() == L'/' || name.back() == L'\\';
 		if (isDir)
 			name.pop_back();
-		if (!isDir && name.empty())
-			continue;
 
 		// Normalize to backslashes so we match the rest of the codebase:
 		for (wchar_t &c : name)
 			if (c == L'/')
 				c = L'\\';
+		if (!SafeEntryName(name)) {
+			LogWarningW(L"  Error opening archive %ls: unsafe entry name\n", path.c_str());
+			return false;
+		}
 
 		entry.name = name;
 		entry.localHeaderPos = localHeaderPos;
