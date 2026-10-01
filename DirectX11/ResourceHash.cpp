@@ -1949,73 +1949,6 @@ void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverri
 	}
 }
 
-template <typename DescType>
-static const TextureOverride *find_texture_override_filter_index_for_desc(const DescType *desc, DrawCallInfo *call_info, bool *any_match)
-{
-	// The fuzzy set is sorted in ascending priority order, so reverse iteration
-	// finds the highest priority matches first. The first one that both matches
-	// and sets a filter_index is our answer, so we don't have to scan the rest.
-	FuzzyTextureOverrides::reverse_iterator i;
-
-	for (i = G->mFuzzyTextureOverrides.rbegin(); i != G->mFuzzyTextureOverrides.rend(); i++) {
-		if ((*i)->matches(desc) && matches_draw_info((*i)->texture_override, call_info)) {
-			if (any_match)
-				*any_match = true;
-			if ((*i)->texture_override->filter_index != FLT_MAX)
-				return (*i)->texture_override;
-		}
-	}
-
-	return NULL;
-}
-
-static const TextureOverride *find_texture_override_filter_index_for_resource_desc(ID3D11Resource* resource, DrawCallInfo* call_info, bool* any_match)
-{
-	D3D11_RESOURCE_DIMENSION dimension;
-	const TextureOverride *best;
-
-	resource->GetType(&dimension);
-	switch (dimension) {
-		case D3D11_RESOURCE_DIMENSION_BUFFER:
-		{
-			ID3D11Buffer* buf = (ID3D11Buffer*)resource;
-			D3D11_BUFFER_DESC buf_desc;
-			buf->GetDesc(&buf_desc);
-			best = find_texture_override_filter_index_for_desc(&buf_desc, call_info, any_match);
-			break;
-		}
-		case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
-		{
-			ID3D11Texture1D* tex1d = (ID3D11Texture1D*)resource;
-			D3D11_TEXTURE1D_DESC tex1d_desc;
-			tex1d->GetDesc(&tex1d_desc);
-			best = find_texture_override_filter_index_for_desc(&tex1d_desc, call_info, any_match);
-			break;
-		}
-		case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
-		{
-			ID3D11Texture2D* tex2d = (ID3D11Texture2D*)resource;
-			D3D11_TEXTURE2D_DESC tex2d_desc;
-			tex2d->GetDesc(&tex2d_desc);
-			best = find_texture_override_filter_index_for_desc(&tex2d_desc, call_info, any_match);
-			break;
-		}
-		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
-		{
-			ID3D11Texture3D* tex3d = (ID3D11Texture3D*)resource;
-			D3D11_TEXTURE3D_DESC tex3d_desc;
-			tex3d->GetDesc(&tex3d_desc);
-			best = find_texture_override_filter_index_for_desc(&tex3d_desc, call_info, any_match);
-			break;
-		}
-		default:
-			best = NULL;
-			break;
-	}
-
-	return best;
-}
-
 static const TextureOverride *find_texture_override_filter_index_for_hash(uint32_t hash, DrawCallInfo *call_info, bool *any_match)
 {
 	TextureOverrideMap::iterator i;
@@ -2047,7 +1980,26 @@ const TextureOverride *find_texture_override_filter_index_for_resource_fuzzy(ID3
 	if (G->mFuzzyTextureOverrides.empty())
 		return NULL;
 
-	return find_texture_override_filter_index_for_resource_desc(resource, call_info, any_match);
+	const TextureOverride *best = NULL;
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	TextureOverrideCandidates *candidates = get_texture_override_candidates(resource);
+	if (candidates) {
+		// Candidates are sorted by priority and already include the resource's
+		// creation-time constraints. Only draw conditions remain to be checked.
+		for (auto i = candidates->fuzzy_matches.rbegin(); i != candidates->fuzzy_matches.rend(); ++i) {
+			TextureOverride *to = *i;
+			if (!matches_draw_info(to, call_info))
+				continue;
+			if (any_match)
+				*any_match = true;
+			if (to->filter_index != FLT_MAX) {
+				best = to;
+				break;
+			}
+		}
+	}
+	LeaveCriticalSection(&G->mCriticalSection);
+	return best;
 }
 
 // Exact-hash-match tail of the filter_index lookups: the fuzzy scan that runs
