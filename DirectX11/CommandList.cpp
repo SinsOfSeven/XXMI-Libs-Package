@@ -3261,6 +3261,12 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 {
 	HackerContext *mHackerContext = state->mHackerContext;
 	ID3D11DeviceChild *shader = NULL;
+	const auto mode = shader_target.evaluation_mode;
+	const bool cb_range = mode == ShaderTargetEvaluationMode::DCL_CB_MIN ||
+		mode == ShaderTargetEvaluationMode::DCL_CB_MAX;
+	const bool srv_range = mode == ShaderTargetEvaluationMode::DCL_SRV_MIN ||
+		mode == ShaderTargetEvaluationMode::DCL_SRV_MAX;
+	const bool declaration_range = cb_range || srv_range;
 
 	switch (shader_target.shader_type)
 	{
@@ -3288,12 +3294,17 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 	}
 
 	if (!shader)
-		return -0.0;  // Negative zero means no shader bound.
+		return declaration_range ? -1.0f : -0.0f;  // Negative means no shader/range available.
 
 	ShaderMap::iterator shader_it = lookup_shader_hash(shader);
 
-	if (shader_it == G->mShaders.end())
+	if (shader_it == G->mShaders.end()) {
+		if (declaration_range)
+			return mode == ShaderTargetEvaluationMode::DCL_CB_MIN || mode == ShaderTargetEvaluationMode::DCL_SRV_MIN
+				? 0.0f : (float)((cb_range ? D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT
+					: D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) - 1);
 		return 0.0;
+	}
 
 	if (shader_target.evaluation_mode == ShaderTargetEvaluationMode::SHADER)
 	{
@@ -3309,7 +3320,48 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 
 	//LogDebug("ShaderTarget Member Evaluation hash=%016I64x\n", shader_it->second);
 
-	const auto mode = shader_target.evaluation_mode;
+	if (declaration_range) {
+		uint32_t first, last;
+		if (shader_bytecode_record_query_declaration_range(shader_it->second,
+				shader_stage_from_letter(shader_target.shader_type), cb_range, &first, &last)) {
+			if (first == UINT32_MAX)
+				return -1.0f;
+			return mode == ShaderTargetEvaluationMode::DCL_CB_MIN || mode == ShaderTargetEvaluationMode::DCL_SRV_MIN
+				? (float)first : (float)last;
+		}
+
+		CriticalSectionGuard(&G->mShaderBindingsLock);
+		auto it = G->mShaderBindingsCache.find(shader_it->second);
+		if (it == G->mShaderBindingsCache.end())
+			return mode == ShaderTargetEvaluationMode::DCL_CB_MIN || mode == ShaderTargetEvaluationMode::DCL_SRV_MIN
+				? 0.0f : (float)((cb_range ? D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT
+					: D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) - 1);
+
+		first = UINT32_MAX;
+		last = UINT32_MAX;
+		if (cb_range) {
+			for (uint32_t slot = 0; slot < it->second.constant_buffers.size(); ++slot) {
+				if (it->second.constant_buffers[slot].type == ShaderConstantBufferType::NONE)
+					continue;
+				if (first == UINT32_MAX)
+					first = slot;
+				last = slot;
+			}
+		} else {
+			for (uint32_t slot = 0; slot < it->second.resources.size(); ++slot) {
+				if (it->second.resources[slot].type == ShaderResourceType::NONE)
+					continue;
+				if (first == UINT32_MAX)
+					first = slot;
+				last = slot;
+			}
+		}
+		if (first == UINT32_MAX)
+			return -1.0f;
+		return mode == ShaderTargetEvaluationMode::DCL_CB_MIN || mode == ShaderTargetEvaluationMode::DCL_SRV_MIN
+			? (float)first : (float)last;
+	}
+
 	float raw_slot = mode == ShaderTargetEvaluationMode::DCL_CB_MASK
 		? 0.0f : shader_target.member_args[0].GetValue(state);
 	if (!(raw_slot >= 0.0f) || raw_slot != floorf(raw_slot))
@@ -8155,11 +8207,13 @@ IniParserResult ShaderTarget::ParseTargetMember(
 {
 	//LogInfo("ShaderTarget::ParseTargetMember: target=%ls, length=%d\n", target, length);
 
-	if (length < 11) // Smallest possible match is "vs->cb_mask".
+	if (length < 10) // Smallest possible match is "vs->cb_min".
 		return IniParserResult::TOKEN_NOT_FOUND;
 
 	static constexpr MemberInfo members[] = {
 		{ L"->cb_mask",         9, ShaderTargetEvaluationMode::DCL_CB_MASK },
+		{ L"->cb_min",          8, ShaderTargetEvaluationMode::DCL_CB_MIN },
+		{ L"->cb_max",          8, ShaderTargetEvaluationMode::DCL_CB_MAX },
 		{ L"->cb_type",         9, ShaderTargetEvaluationMode::DCL_CB_TYPE, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },
@@ -8169,6 +8223,8 @@ IniParserResult ShaderTarget::ParseTargetMember(
 		{ L"->srv_declares",   14, ShaderTargetEvaluationMode::DCL_SRV_DECLARES, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },
+		{ L"->srv_min",         9, ShaderTargetEvaluationMode::DCL_SRV_MIN },
+		{ L"->srv_max",         9, ShaderTargetEvaluationMode::DCL_SRV_MAX },
 		{ L"->srv_type",       10, ShaderTargetEvaluationMode::DCL_SRV_TYPE, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },

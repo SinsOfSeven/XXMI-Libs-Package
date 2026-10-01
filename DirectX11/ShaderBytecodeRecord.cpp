@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "ByteCodeReader.h"
+#include "Overlay.h"
 #include "globals.h"
 #include "log.h"
 
@@ -143,6 +144,8 @@ public:
 	void save(UINT64 hash, const wchar_t *shader_type, const std::vector<uint8_t> *bytecode);
 	bool save_declarations(UINT64 hash, const wchar_t *shader_type, const void *bytecode, size_t size);
 	bool query_declaration(UINT64 hash, ShaderStage stage, ShaderDeclarationField field, UINT slot, uint32_t *value);
+	bool query_declaration_range(UINT64 hash, ShaderStage stage, bool constant_buffer,
+		uint32_t *first, uint32_t *last);
 
 	// Writes the metadata out if records were queued since the last flush.
 	// Called from the per-frame seam, exactly like the ShaderRegex cache:
@@ -408,15 +411,15 @@ bool ShaderBytecodeRecordStore::create_metadata()
 		return false;
 	}
 
-	LogWarning("ShaderBytecodeRecord: cache created at %S\n", dat_path);
+	LogInfo("ShaderBytecodeRecord: cache created at %S\n", dat_path);
 	return true;
 }
 
 bool ShaderBytecodeRecordStore::ensure_valid(bool create_if_missing)
 {
 	wchar_t dat_path[MAX_PATH], blob_path[MAX_PATH];
-
 	get_paths(dat_path, blob_path);
+	const bool metadata_exists = GetFileAttributesW(dat_path) != INVALID_FILE_ATTRIBUTES;
 	if (blob.set_path(blob_path))
 		reset_state();
 	metadata_path = dat_path;
@@ -435,7 +438,7 @@ bool ShaderBytecodeRecordStore::ensure_valid(bool create_if_missing)
 		// over by the remaining record offsets):
 		prune_oldest();
 
-		LogWarning("ShaderBytecodeRecord: loaded %u records from %S (blob %Iu)\n",
+		LogInfo("ShaderBytecodeRecord: loaded %u records from %S (blob %Iu)\n",
 				(unsigned)records.size(), dat_path, (uint64_t)header.blob_size);
 		return true;
 	}
@@ -445,7 +448,10 @@ bool ShaderBytecodeRecordStore::ensure_valid(bool create_if_missing)
 	if (!create_if_missing)
 		return false;
 
-	LogWarning("ShaderBytecodeRecord: %S not present or invalid, (re)creating\n", dat_path);
+	if (metadata_exists)
+		LogWarning("ShaderBytecodeRecord: invalid cache %S, recreating\n", dat_path);
+	else
+		LogInfo("ShaderBytecodeRecord: cache not present at %S, creating\n", dat_path);
 	wipe_files();
 
 	return create_metadata();
@@ -639,6 +645,47 @@ bool ShaderBytecodeRecordStore::query_declaration(UINT64 hash, ShaderStage stage
 	return false;
 }
 
+bool ShaderBytecodeRecordStore::query_declaration_range(UINT64 hash, ShaderStage stage,
+		bool constant_buffer, uint32_t *first, uint32_t *last)
+{
+	if (!first || !last || stage == ShaderStage::INVALID)
+		return false;
+	const uint8_t *block = nullptr;
+	auto runtime = runtime_declarations.find({stage, hash});
+	if (runtime != runtime_declarations.end()) {
+		block = runtime->second.data();
+	} else {
+		if (!loaded && (!G->SHADER_CACHE_PATH[0] || !G->CACHE_SHADERS || !ensure_valid(false)))
+			return false;
+		auto record = find_record(stage, hash);
+		if (!record || !declaration_offset(*record))
+			return false;
+		block = declaration_arena.data() + declaration_offset(*record);
+	}
+	ShaderDeclarationBlockHeader h;
+	memcpy(&h, block, sizeof(h));
+	*first = UINT32_MAX;
+	*last = UINT32_MAX;
+	if (constant_buffer) {
+		for (uint32_t slot = 0; slot < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; ++slot) {
+			if (!(h.cb_mask & (1u << slot)))
+				continue;
+			if (*first == UINT32_MAX)
+				*first = slot;
+			*last = slot;
+		}
+	} else {
+		for (uint32_t slot = 0; slot < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT; ++slot) {
+			if (!(h.srv_mask[slot / 8] & (1u << (slot % 8))))
+				continue;
+			if (*first == UINT32_MAX)
+				*first = slot;
+			*last = slot;
+		}
+	}
+	return true;
+}
+
 bool ShaderBytecodeRecordStore::load(UINT64 hash, const wchar_t *shader_type, std::vector<uint8_t> *bytecode)
 {
 	ShaderBytecodeRecordEntry *record;
@@ -710,7 +757,7 @@ void ShaderBytecodeRecordStore::save(UINT64 hash, const wchar_t *shader_type, co
 	uint32_t dxbc_version;
 	if (!shader_bytecode_dxbc_version(bytecode->data(), bytecode->size(), &dxbc_version)
 	 || shader_stage_from_dxbc_type(dxbc_version >> 16) != stage) {
-		LogWarning("ShaderBytecodeRecord: save %S %016I64x skipped - not valid %S bytecode\n",
+		LogOverlayW(LOG_WARNING, L"ShaderBytecodeRecord: save %ls %016I64x skipped - not valid %ls bytecode\n",
 				shader_type, hash, shader_type);
 		return;
 	}
@@ -737,7 +784,7 @@ void ShaderBytecodeRecordStore::save(UINT64 hash, const wchar_t *shader_type, co
 	if (records.size() > SHADER_BYTECODE_RECORD_MAX)
 		prune_oldest();
 
-	LogWarning("ShaderBytecodeRecord: saved %S %016I64x at blob offset %Iu (%u bytes)\n",
+	LogDebug("ShaderBytecodeRecord: saved %S %016I64x at blob offset %Iu (%u bytes)\n",
 			shader_type, hash, (uint64_t)blob_offset, (unsigned)bytecode->size());
 
 	// Defer the disk write until the per-frame flush, like the regex cache:
@@ -788,4 +835,12 @@ bool shader_bytecode_record_query_declaration(UINT64 hash, ShaderStage stage,
 {
 	std::lock_guard<std::mutex> lock(shader_bytecode_record_mutex);
 	return shader_bytecode_record_store.query_declaration(hash, stage, field, slot, value);
+}
+
+bool shader_bytecode_record_query_declaration_range(UINT64 hash, ShaderStage stage,
+		bool constant_buffer, uint32_t *first, uint32_t *last)
+{
+	std::lock_guard<std::mutex> lock(shader_bytecode_record_mutex);
+	return shader_bytecode_record_store.query_declaration_range(hash, stage,
+			constant_buffer, first, last);
 }

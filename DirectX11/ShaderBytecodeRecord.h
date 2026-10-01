@@ -63,3 +63,5 @@ bool shader_bytecode_record_save_declarations(UINT64 hash, const wchar_t *shader
 		const void *bytecode, size_t size);
 bool shader_bytecode_record_query_declaration(UINT64 hash, ShaderStage stage,
 		ShaderDeclarationField field, UINT slot, uint32_t *value);
+bool shader_bytecode_record_query_declaration_range(UINT64 hash, ShaderStage stage,
+		bool constant_buffer, uint32_t *first, uint32_t *last);

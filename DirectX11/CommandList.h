@@ -982,6 +982,10 @@ enum class ShaderTargetEvaluationMode : uint32_t {
 	DCL_SRV_TYPE       = 0b00000000000000000000000000100000,
 	DCL_SRV_DIMENSION  = 0b00000000000000000000000001000000,
 	DCL_SRV_STRIDE     = 0b00000000000000000000000010000000,
+	DCL_CB_MIN         = 0b00000000000000000000001000000000,
+	DCL_CB_MAX         = 0b00000000000000000000010000000000,
+	DCL_SRV_MIN        = 0b00000000000000000000100000000000,
+	DCL_SRV_MAX        = 0b00000000000000000001000000000000,
 };
 SENSIBLE_ENUM(ShaderTargetEvaluationMode);
 //static EnumName_t<const wchar_t*, ShaderTargetEvaluationMode> ShaderTargetEvaluationModeNames[] = {
@@ -1699,6 +1703,9 @@ public:
 
 	void run(CommandListState*) override;
 	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override;
+
+private:
+	void RunSlot(CommandListState *state);
 };
 
 enum class DrawCommandType {
