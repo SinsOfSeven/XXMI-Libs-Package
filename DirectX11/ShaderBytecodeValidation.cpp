@@ -68,7 +68,6 @@ bool shader_bytecode_dxbc_instructions(const void *data, size_t size)
 			return false;
 		const uint8_t *tokens = chunk + 16;
 		uint32_t remaining = token_count - 2;
-		bool has_return = false;
 		while (remaining) {
 			uint32_t token;
 			memcpy(&token, tokens, sizeof(token));
@@ -101,14 +100,10 @@ bool shader_bytecode_dxbc_instructions(const void *data, size_t size)
 					memcpy(&ext, tokens + header_words * 4, sizeof(ext));
 					++header_words;
 				}
-				if (opcode == D3D10_SB_OPCODE_RET || opcode == D3D10_SB_OPCODE_RETC)
-					has_return = true;
 			}
 			tokens += length * 4;
 			remaining -= length;
 		}
-		if (!has_return)
-			return false;
 	}
 	return found_code;
 }
