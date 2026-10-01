@@ -567,13 +567,13 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 	case ShaderRegexCache::NO_MATCH:
 		goto out_drop;
 	case ShaderRegexCache::MATCH:
-		LogInfo("Loaded %S %016I64x command list from ShaderRegex cache\n", shader_type, hash);
+		LogDebug("Loaded %S %016I64x command list from ShaderRegex cache\n", shader_type, hash);
 		goto out_drop;
 	case ShaderRegexCache::PATCH:
-		LogInfo("Loaded %S %016I64x bytecode from ShaderRegex cache\n", shader_type, hash);
+		LogDebug("Loaded %S %016I64x bytecode from ShaderRegex cache\n", shader_type, hash);
 		break;
 	case ShaderRegexCache::NO_CACHE:
-		LogInfo("Performing deferred shader analysis on %S %016I64x (cache miss, reason %d)...\n",
+		LogDebug("Performing deferred shader analysis on %S %016I64x (cache miss, reason %d)...\n",
 				shader_type, hash, (int)cache_reason);
 
 		// Preserve the original bytecode in the ShaderBytecodeRecord ledger so
@@ -591,18 +591,18 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 		auto it = G->mShaderModelCache.find(hash);
 		if (it != G->mShaderModelCache.end()) {
 			orig_info->shaderModel = it->second.shaderModel;
-			LogInfo("%S %016I64x shader model %s is loaded from cache.\n", shader_type, hash, orig_info->shaderModel.c_str());
+			LogDebug("%S %016I64x shader model %s is loaded from cache.\n", shader_type, hash, orig_info->shaderModel.c_str());
 		}
 		else {
 			if (orig_info->shaderModel == "bin") {
 				// Get shader model from bytecode.
 				if (!get_shader_model_from_bytecode(orig_info->byteCode->GetBufferPointer(), orig_info->byteCode->GetBufferSize(), &orig_info->shaderModel)) {
-					LogInfo("%S %016I64x shader model detection from bytecode failed.\n", shader_type, hash);
+					LogWarning("%S %016I64x shader model detection from bytecode failed; skipping ShaderRegex processing\n", shader_type, hash);
 					goto out_drop;
 				}
 				// Store shader model in cache.
 				G->mShaderModelCache.emplace(hash, ShaderModelCacheEntry{ orig_info->shaderModel });
-				LogInfo("%S %016I64x shader model %s detected from bytecode.\n", shader_type, hash, orig_info->shaderModel.c_str());
+				LogDebug("%S %016I64x shader model %s detected from bytecode.\n", shader_type, hash, orig_info->shaderModel.c_str());
 			}
 		}
 
@@ -613,7 +613,7 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 
 		// Skip disassemble entirely if there are no matching ShaderRegex with Patterns found.
 		if (!decompilation_required) {
-			LogInfo("%S %016I64x disassembly skipped: no matching ShaderRegex with Patterns found for %s.\n", shader_type, hash, orig_info->shaderModel.c_str());
+			LogDebug("%S %016I64x disassembly skipped: no matching ShaderRegex with Patterns found for %s.\n", shader_type, hash, orig_info->shaderModel.c_str());
 			goto out_drop;
 		}
 
@@ -630,12 +630,12 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 		try {
 			patch_regex = apply_shader_regex_groups(&asm_text, shader_type, &orig_info->shaderModel, hash, &tagline);
 		} catch (...) {
-			LogInfo("    *** Exception while patching shader\n");
+			LogWarning("Exception while applying ShaderRegex patches to %S %016I64x\n", shader_type, hash);
 			goto out_drop;
 		}
 
 		if (!patch_regex) {
-			LogInfo("Patch did not apply\n");
+			LogDebug("ShaderRegex patches did not change %S %016I64x\n", shader_type, hash);
 			goto out_drop;
 		}
 
@@ -650,7 +650,8 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 			vector<AssemblerParseError> parse_errors;
 			hr = AssembleFluganWithSignatureParsing(&asm_vector, &patched_bytecode, &parse_errors);
 			if (FAILED(hr)) {
-				LogInfo("    *** Assembling patched shader failed\n");
+				LogOverlayW(LOG_WARNING, L"Assembling ShaderRegex replacement failed for %016I64x-%ls (hr=0x%08x)\n",
+					hash, shader_type, hr);
 				goto out_drop;
 			}
 			// Parse errors are currently being treated as non-fatal on
@@ -676,7 +677,8 @@ void HackerContext::DeferredShaderReplacement(ID3D11DeviceChild *shader, UINT64 
 			orig_info->linkage, &patched_shader);
 	CleanupShaderMaps(patched_shader);
 	if (FAILED(hr)) {
-		LogInfo("    *** Creating replacement shader failed\n");
+		LogOverlayW(LOG_WARNING, L"Creating ShaderRegex replacement failed for %016I64x-%ls (hr=0x%08x)\n",
+			hash, shader_type, hr);
 		goto out_drop;
 	}
 

@@ -2375,11 +2375,11 @@ STDMETHODIMP HackerDevice::CreateTexture3D(THIS_
 	D3D11_TEXTURE3D_DESC newDesc;
 	const D3D11_TEXTURE3D_DESC *pNewDesc = NULL;
 
-	LogInfo("HackerDevice::CreateTexture3D called with parameters\n");
+	LogDebug("HackerDevice::CreateTexture3D called with parameters\n");
 	if (pDesc)
 		LogDebugResourceDesc(pDesc);
 	if (pInitialData && pInitialData->pSysMem) {
-		LogInfo("  pInitialData = %p->%p, SysMemPitch: %u, SysMemSlicePitch: %u\n",
+		LogDebug("  pInitialData = %p->%p, SysMemPitch: %u, SysMemSlicePitch: %u\n",
 			pInitialData, pInitialData->pSysMem, pInitialData->SysMemPitch, pInitialData->SysMemSlicePitch);
 	}
 
@@ -2400,7 +2400,7 @@ STDMETHODIMP HackerDevice::CreateTexture3D(THIS_
 	hash = data_hash = CalcTexture3DDataHash(pDesc, pInitialData);
 	if (pDesc)
 		hash = CalcTexture3DDescHash(hash, pDesc);
-	LogInfo("  InitialData = %p, hash = %08lx\n", pInitialData, hash);
+	LogDebug("  InitialData = %p, hash = %08lx\n", pInitialData, hash);
 
 	// Override custom settings?
 	pNewDesc = process_texture_override(hash, pDesc, &newDesc);
@@ -2529,7 +2529,7 @@ static UINT64 hash_shader(const void *pShaderBytecode, SIZE_T BytecodeLength)
 		case ShaderHashType::FNV:
 fnv:
 			hash = fnv_64_buf(pShaderBytecode, BytecodeLength);
-			LogInfo("       FNV hash = %016I64x\n", hash);
+			LogDebug("       FNV hash = %016I64x\n", hash);
 			break;
 
 		case ShaderHashType::EMBEDDED:
@@ -2543,14 +2543,14 @@ fnv:
 			// don't want to pull in all of winsock just for ntohl,
 			// and since we are only targetting x86... meh.
 			hash = _byteswap_uint64(header->hash[0] | (UINT64)header->hash[1] << 32);
-			LogInfo("  Embedded hash = %016I64x\n", hash);
+			LogDebug("  Embedded hash = %016I64x\n", hash);
 			break;
 
 		case ShaderHashType::BYTECODE:
 			hash = hash_shader_bytecode(header, BytecodeLength);
 			if (!hash)
 				goto fnv;
-			LogInfo("  Bytecode hash = %016I64x\n", hash);
+			LogDebug("  Bytecode hash = %016I64x\n", hash);
 			break;
 	}
 
@@ -2572,6 +2572,10 @@ static void CacheShaderBindings(uint64_t hash, const void* pShaderBytecode, SIZE
 	ShaderBindings bindings{};
 
 	const bool parsed = get_shader_bindings_from_bytecode( pShaderBytecode, BytecodeLength, &bindings);
+	if (!parsed) {
+		LogDebug("  Failed to parse %016I64x shader bindings from bytecode.\n", hash);
+		return;
+	}
 
 	{
 		CriticalSectionGuard(&G->mShaderBindingsLock);
@@ -2656,7 +2660,7 @@ STDMETHODIMP HackerDevice::CreateShader(THIS_
 		LeaveCriticalSection(&G->mCriticalSection);
 	}
 
-	LogInfo("  returns result = %x, handle = %p\n", hr, *ppShader);
+	LogDebug("  returns result = %x, handle = %p\n", hr, *ppShader);
 
 	return hr;
 }
@@ -2671,7 +2675,7 @@ STDMETHODIMP HackerDevice::CreateVertexShader(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11VertexShader **ppVertexShader)
 {
-	LogInfo("HackerDevice::CreateVertexShader called with BytecodeLength = %Iu, handle = %p, ClassLinkage = %p\n", BytecodeLength, pShaderBytecode, pClassLinkage);
+	LogDebug("HackerDevice::CreateVertexShader called with BytecodeLength = %Iu, handle = %p, ClassLinkage = %p\n", BytecodeLength, pShaderBytecode, pClassLinkage);
 
 	return CreateShader<ID3D11VertexShader, &ID3D11Device::CreateVertexShader>
 			(pShaderBytecode, BytecodeLength, pClassLinkage, ppVertexShader, L"vs");
@@ -2687,7 +2691,7 @@ STDMETHODIMP HackerDevice::CreateGeometryShader(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11GeometryShader **ppGeometryShader)
 {
-	LogInfo("HackerDevice::CreateGeometryShader called with BytecodeLength = %Iu, handle = %p\n", BytecodeLength, pShaderBytecode);
+	LogDebug("HackerDevice::CreateGeometryShader called with BytecodeLength = %Iu, handle = %p\n", BytecodeLength, pShaderBytecode);
 
 	return CreateShader<ID3D11GeometryShader, &ID3D11Device::CreateGeometryShader>
 			(pShaderBytecode, BytecodeLength, pClassLinkage, ppGeometryShader, L"gs");
@@ -2713,7 +2717,7 @@ STDMETHODIMP HackerDevice::CreateGeometryShaderWithStreamOutput(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11GeometryShader **ppGeometryShader)
 {
-	LogInfo("HackerDevice::CreateGeometryShaderWithStreamOutput called.\n");
+	LogDebug("HackerDevice::CreateGeometryShaderWithStreamOutput called.\n");
 
 	// TODO: This is another call that can create geometry and/or vertex
 	// shaders - hook them up and allow them to be overridden as well.
@@ -2726,7 +2730,7 @@ STDMETHODIMP HackerDevice::CreateGeometryShaderWithStreamOutput(THIS_
 
 	HRESULT hr = mOrigDevice1->CreateGeometryShaderWithStreamOutput(pShaderBytecode, BytecodeLength, pSODeclaration,
 		NumEntries, pBufferStrides, NumStrides, RasterizedStream, pClassLinkage, ppGeometryShader);
-	LogInfo("  returns result = %x, handle = %p\n", hr, (ppGeometryShader ? *ppGeometryShader : NULL));
+	LogDebug("  returns result = %x, handle = %p\n", hr, (ppGeometryShader ? *ppGeometryShader : NULL));
 
 	return hr;
 }
@@ -2741,7 +2745,7 @@ STDMETHODIMP HackerDevice::CreatePixelShader(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11PixelShader **ppPixelShader)
 {
-	LogInfo("HackerDevice::CreatePixelShader called with BytecodeLength = %Iu, handle = %p, ClassLinkage = %p\n", BytecodeLength, pShaderBytecode, pClassLinkage);
+	LogDebug("HackerDevice::CreatePixelShader called with BytecodeLength = %Iu, handle = %p, ClassLinkage = %p\n", BytecodeLength, pShaderBytecode, pClassLinkage);
 
 	return CreateShader<ID3D11PixelShader, &ID3D11Device::CreatePixelShader>
 			(pShaderBytecode, BytecodeLength, pClassLinkage, ppPixelShader, L"ps");
@@ -2757,7 +2761,7 @@ STDMETHODIMP HackerDevice::CreateHullShader(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11HullShader **ppHullShader)
 {
-	LogInfo("HackerDevice::CreateHullShader called with BytecodeLength = %Iu, handle = %p\n", BytecodeLength, pShaderBytecode);
+	LogDebug("HackerDevice::CreateHullShader called with BytecodeLength = %Iu, handle = %p\n", BytecodeLength, pShaderBytecode);
 
 	return CreateShader<ID3D11HullShader, &ID3D11Device::CreateHullShader>
 			(pShaderBytecode, BytecodeLength, pClassLinkage, ppHullShader, L"hs");
@@ -2773,7 +2777,7 @@ STDMETHODIMP HackerDevice::CreateDomainShader(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11DomainShader **ppDomainShader)
 {
-	LogInfo("HackerDevice::CreateDomainShader called with BytecodeLength = %Iu, handle = %p\n", BytecodeLength, pShaderBytecode);
+	LogDebug("HackerDevice::CreateDomainShader called with BytecodeLength = %Iu, handle = %p\n", BytecodeLength, pShaderBytecode);
 
 	return CreateShader<ID3D11DomainShader, &ID3D11Device::CreateDomainShader>
 			(pShaderBytecode, BytecodeLength, pClassLinkage, ppDomainShader, L"ds");
@@ -2789,7 +2793,7 @@ STDMETHODIMP HackerDevice::CreateComputeShader(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11ComputeShader **ppComputeShader)
 {
-	LogInfo("HackerDevice::CreateComputeShader called with BytecodeLength = %Iu, handle = %p\n", BytecodeLength, pShaderBytecode);
+	LogDebug("HackerDevice::CreateComputeShader called with BytecodeLength = %Iu, handle = %p\n", BytecodeLength, pShaderBytecode);
 
 	return CreateShader<ID3D11ComputeShader, &ID3D11Device::CreateComputeShader>
 			(pShaderBytecode, BytecodeLength, pClassLinkage, ppComputeShader, L"cs");
