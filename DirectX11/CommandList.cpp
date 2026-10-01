@@ -715,6 +715,26 @@ static bool ParseCheckTextureOverride(const wchar_t *section,
 	return false;
 }
 
+static bool ParseEnsureMipHashes(const wchar_t *section,
+		const wchar_t *key, wstring *val,
+		CommandList *explicit_command_list,
+		CommandList *pre_command_list,
+		CommandList *post_command_list,
+		const wstring *ini_namespace)
+{
+	EnsureMipHashesCommand *operation = new EnsureMipHashesCommand();
+	if (operation->target.ParseTarget(val->c_str(), true, ini_namespace, pre_command_list->scope,
+			true, true)) {
+		// The request needs invalidation tracking even when no global LOD option
+		// is enabled. Hashing remains on demand at the explicit request.
+		G->track_mip_hashes = true;
+		return AddCommandToList(operation, explicit_command_list, NULL,
+				pre_command_list, post_command_list, section, key, val);
+	}
+	delete operation;
+	return false;
+}
+
 static bool ParseResetPerFrameLimits(const wchar_t *section,
 		const wchar_t *key, wstring *val,
 		CommandList *explicit_command_list,
@@ -1283,6 +1303,9 @@ bool ParseCommandListGeneralCommands(const wchar_t *section,
 	if (!wcscmp(key, L"checktextureoverride"))
 		return ParseCheckTextureOverride(section, key, val, explicit_command_list, pre_command_list, post_command_list, ini_namespace);
 
+	if (!wcscmp(key, L"ensuremiphashes"))
+		return ParseEnsureMipHashes(section, key, val, explicit_command_list, pre_command_list, post_command_list, ini_namespace);
+
 	if (!wcscmp(key, L"run")) {
 		if (!wcsncmp(val->c_str(), L"customshader", 12) || !wcsncmp(val->c_str(), L"builtincustomshader", 19))
 			return ParseRunShader(section, key, val, explicit_command_list, pre_command_list, post_command_list, ini_namespace);
@@ -1345,6 +1368,42 @@ bool ParseCommandListGeneralCommands(const wchar_t *section,
 
 static std::string slot_log_name(const ResourceCopyTarget &target, unsigned slot);
 static CustomResource* pool_element(CustomResourcePool *pool, int pool_first, unsigned index, bool is_assignment);
+
+void EnsureMipHashesCommand::run(CommandListState *state)
+{
+	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
+	int first = (int)target.slot;
+	unsigned count = 1;
+	if (target.IsRange() && !target.ResolveRange(state, &first, &count))
+		return;
+	unsigned original_slot = target.slot;
+	for (unsigned i = 0; i < count; ++i) {
+		if (target.IsRange())
+			target.slot = (unsigned)first + i;
+		ID3D11View *view = nullptr;
+		ID3D11Resource *resource = target.GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
+		if (resource) {
+			ResourceHandleInfo *fallback_info = nullptr;
+			if (target.type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
+				D3D11_RESOURCE_DIMENSION dimension;
+				resource->GetType(&dimension);
+				CustomResource *custom_resource = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D
+					? target.GetCustomResource(state) : nullptr;
+				if (custom_resource) {
+					if (!custom_resource->handle_info)
+						custom_resource->handle_info = std::make_unique<ResourceHandleInfo>();
+					fallback_info = custom_resource->handle_info.get();
+					RegisterCustomTextureMipHashCache(resource, fallback_info);
+				}
+			}
+			EnsureTexture2DHashes(state->mHackerContext, resource, true, fallback_info);
+			resource->Release();
+		}
+		if (view)
+			view->Release();
+	}
+	target.slot = original_slot;
+}
 
 void CheckTextureOverrideCommand::run(CommandListState *state)
 {
@@ -3180,9 +3239,6 @@ float CommandListOperand::process_texture_filter(CommandListState *state)
 
 		case ResourceCopyTargetEvaluationMode::RESOURCE_SPATIAL_HASH:
 			return texture_filter_target.GetResourceSpatialHash(state);
-		case ResourceCopyTargetEvaluationMode::RESOURCE_MIP_HASH:
-			return texture_filter_target.GetResourceMipHash(state);
-			
 		case ResourceCopyTargetEvaluationMode::RESOURCE_SOURCE_STRIDE:
 		{
 			CustomResource* custom_resource = texture_filter_target.GetCustomResource(state);
@@ -8399,10 +8455,6 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 			MemberArg::Type::Unsigned, // Byte Offset 
 			MemberArg::Type::Unsigned  // Byte Size 
 		}} },
-		{ L"->miphash",        9, ResourceCopyTargetEvaluationMode::RESOURCE_MIP_HASH, {{
-			MemberArg::Type::Unsigned, // Reverse mip index: 0 is the smallest mip
-			MemberArg::Type::Unsigned  // Array slice in the underlying resource
-		}} },
 		{ L"->bindflags",     11, ResourceCopyTargetEvaluationMode::RESOURCE_BIND_FLAGS },
 		{ L"->lastframe",     11, ResourceCopyTargetEvaluationMode::POOL_LAST_FRAME },
 		{ L"->hashregion",    12, ResourceCopyTargetEvaluationMode::RESOURCE_REGION_HASH, {{
@@ -8427,9 +8479,6 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 	};
 
 	IniParserResult ret = SyntaxTarget::ParseTargetMember(members, target, length, temp_target, evaluation_mode, ini_namespace, scope);
-	if (ret == IniParserResult::TOKEN_FOUND && evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_MIP_HASH)
-		G->track_mip_hashes = true;
-
 	if (ret == IniParserResult::TOKEN_FOUND
 			&& evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_FILTER)
 	{
@@ -11238,44 +11287,6 @@ float ResourceCopyTarget::GetResourceRegionHash(CommandListState* state)
 	if (view)
 		view->Release();
 
-	return ret;
-}
-
-float ResourceCopyTarget::GetResourceMipHash(CommandListState* state)
-{
-	ID3D11View *view = nullptr;
-	ID3D11Resource *resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
-	float ret = 0.0f;
-	if (resource) {
-		D3D11_RESOURCE_DIMENSION dimension;
-		resource->GetType(&dimension);
-		if (dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-			CustomResource *custom_resource = type == ResourceCopyTargetType::CUSTOM_RESOURCE
-				? GetCustomResource(state) : nullptr;
-			if (custom_resource && !custom_resource->handle_info)
-				custom_resource->handle_info = std::make_unique<ResourceHandleInfo>();
-			if (custom_resource)
-				RegisterCustomTextureMipHashCache(resource, custom_resource->handle_info.get());
-			D3D11_TEXTURE2D_DESC desc;
-			static_cast<ID3D11Texture2D *>(resource)->GetDesc(&desc);
-			float reverse_mip = member_args[0].GetValue(state);
-			float array_slice = member_args[1].GetValue(state);
-			// Check before integer conversion, including NaN, infinity, fractions
-			// and negatives. Both indices address the resource, not the SRV range.
-			if (reverse_mip >= 0 && reverse_mip < desc.MipLevels &&
-					array_slice >= 0 && array_slice < desc.ArraySize &&
-					reverse_mip == floorf(reverse_mip) && array_slice == floorf(array_slice)) {
-				uint32_t hash;
-				if (GetTexture2DMipHash(state->mHackerContext, resource,
-						(UINT)reverse_mip, (UINT)array_slice, &hash,
-						custom_resource ? custom_resource->handle_info.get() : nullptr))
-					ret = EncodeFloat30(hash);
-			}
-		}
-		resource->Release();
-	}
-	if (view)
-		view->Release();
 	return ret;
 }
 

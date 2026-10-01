@@ -130,14 +130,17 @@ Hashes are singletons and only compare equal, so accepting several of them is do
 $is_either = ps-t0->Match(1234abcd | 89abcdef)
 ```
 
-8 digits compare against the ordinary 32-bit resource hash **or any current, cached Texture2D mip CRC32C**. The latter includes mip hashes requested with `->MipHash(reverse_mip, array_slice)` and completed hashes from `track_lod_hashes`. `->Match(...)` never reads a mip back from the GPU, so a mip that has not been cached cannot match yet. It compares the full 8-digit CRC, not the 30-bit value encoded as an INI float by `->MipHash`. A 16-digit hash remains reserved for future shader matching.
+8 digits compare against the ordinary 32-bit resource hash **or any current, cached Texture2D mip CRC32C**. These include mip hashes requested with `ensuremiphashes = resource` and completed hashes from `track_lod_hashes`. `->Match(...)` never reads a mip back from the GPU, so a mip that has not been cached cannot match yet. It compares the full 8-digit CRC. A 16-digit hash remains reserved for future shader matching.
 
 ```ini
-$mip_value = ResourceFoo->MipHash(0, 0) ; Populates the smallest mip's cache if needed.
+[CommandListRefreshMips]
+ensuremiphashes = ResourceFoo
+
+[CommandListMatchMipHash]
 $matches = ResourceFoo->Match(1234abcd) ; Tests its full CRC and the ordinary hash.
 ```
 
-The order matters when both lines run in one command list. A subsequent write to the mip invalidates its cached CRC; `->Match(...)` then stops matching it until another `->MipHash(...)` request refreshes it. Description-only filters remain available for `[Resource...]` targets without creating their D3D resource. When evaluation reaches a hash operand on `[Resource...]`, it resolves the actual resource and checks its available hashes; it may instantiate that resource. A purely hexadecimal token is unambiguous because filter names carry the non-hex `Filter` prefix.
+After `ensuremiphashes` completes, `->Match(...)` can match any cached mip CRC. A subsequent write invalidates the affected CRC; it stops matching until another `ensuremiphashes` request refreshes it. Description-only filters remain available for `[Resource...]` targets without creating their D3D resource. When evaluation reaches a hash operand on `[Resource...]`, it resolves the actual resource and checks its available hashes; it may instantiate that resource. A purely hexadecimal token is unambiguous because filter names carry the non-hex `Filter` prefix.
 
 ## Usage
 
@@ -160,7 +163,7 @@ endif
 
 Because the result is a normal expression value, filters compose with the rest of the expression language (arithmetic, comparisons, `if` conditions, etc.).
 
-`->Match(...)` itself performs no GPU readback. An earlier `->MipHash(...)` request can block to fill its cache; later `->Match(...)` calls reuse the result.
+`->Match(...)` itself performs no GPU readback. `ensuremiphashes = resource` queues an asynchronous refresh of the full mip chain; later `->Match(...)` calls use completed cached results.
 
 See the [Resource Metadata](resource-metadata.md#match) documentation for the `->Match(<expression>)` member details.
 

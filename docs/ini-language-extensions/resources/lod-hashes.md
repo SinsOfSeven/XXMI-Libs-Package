@@ -1,6 +1,6 @@
 # LOD Hashes
 
-For INI expressions that request only a particular mip, see [`->MipHash(reverse_mip, array_slice)`](resource-metadata.md#miphashreverse_mip-array_slice). It is independent of the whole-texture override matching described here.
+For an explicit asynchronous request to refresh a resource's full mip chain, see [`ensuremiphashes`](../commands/README.md#ensuremiphashes). It is independent of the whole-texture override matching described here.
 
 `lod_hash=` lets a `[TextureOverride]` match a Texture2D when **any one** of its mip levels or array slices has the given CRC32C. This is useful for textures created without pixel data and filled later: their ordinary `hash=` may identify only the resource description.
 
@@ -38,11 +38,11 @@ track_mips = 1
 
 `match_initial_data = 0` matches a null `pInitialData` argument; `1` matches a non-null argument. It checks the creation argument, not whether the resource's contents are currently empty. Description and initial-data conditions are evaluated once per resource for mip tracking; later writes update the selected resource's cache.
 
-`hash=` is the normal creation-time texture hash. If the texture was created without initial data, it is derived from the resource description; several textures can share it. `track_mips=1` records initial mip CRCs and complete `UpdateSubresource` uploads for resources selected by either a creation hash or a fuzzy description match. Complete copies propagate CRCs when the source has a known CRC. Read/write and write/discard Map shadows can also supply a complete mip; the write/discard shadow starts at zero so unwritten bytes have a defined value. Partial writes and copies from unknown sources leave affected mips unknown. The captured CRCs are shared by `lod_hash=`, `->MipHash(...)`, frame analysis and `->Match(...)`. This opt-in does not scan every texture in the game.
+`hash=` is the normal creation-time texture hash. If the texture was created without initial data, it is derived from the resource description; several textures can share it. `track_mips=1` records initial mip CRCs and complete `UpdateSubresource` uploads for resources selected by either a creation hash or a fuzzy description match. Complete copies propagate CRCs when the source has a known CRC. Read/write and write/discard Map shadows can also supply a complete mip; the write/discard shadow starts at zero so unwritten bytes have a defined value. Partial writes and copies from unknown sources leave affected mips unknown. The captured CRCs are shared by `lod_hash=`, `ensuremiphashes`, frame analysis and `->Match(...)`. This opt-in does not scan every texture in the game.
 
-If a game uploads into a separate staging texture and then copies into the selected texture, give the staging texture its own `track_mips=1` override when its creation hash is known. The destination can reuse a complete source CRC; a copy from an untracked source remains unknown. CPU capture runs on immediate contexts. Deferred command lists invalidate the affected hashes and need a later explicit `->MipHash(...)` request to recover an unknown mip.
+If a game uploads into a separate staging texture and then copies into the selected texture, give the staging texture its own `track_mips=1` override when its creation hash is known. The destination can reuse a complete source CRC; a copy from an untracked source remains unknown. CPU capture runs on immediate contexts. Deferred command lists invalidate the affected hashes; use `ensuremiphashes = resource` to request a later refresh.
 
-The CPU capture path excludes textures with render-target, depth-stencil or UAV bind flags, shared-resource flags, or automatic mip generation. Those resources can receive pixels outside the captured upload path. An explicit `->MipHash(...)` request can still use its separate readback fallback.
+The CPU capture path excludes textures with render-target, depth-stencil or UAV bind flags, shared-resource flags, or automatic mip generation. Those resources can receive pixels outside the captured upload path. An explicit `ensuremiphashes` request can still use the asynchronous readback path.
 
 ## Finding a hash
 

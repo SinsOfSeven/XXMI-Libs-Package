@@ -185,6 +185,8 @@ private:
 	// game resources (including swap-chain buffers) alive across frames.
 	struct TextureHashReadback {
 		ID3D11Resource *source;
+		// Used only after verifying that this alias is still registered.
+		ResourceHandleInfo *fallback_info = nullptr;
 		ID3D11Texture2D *staging;
 		D3D11_TEXTURE2D_DESC desc, hash_desc;
 		uint64_t generation, readback_id;
@@ -197,7 +199,7 @@ private:
 	std::vector<TextureHashReadback> mTextureHashReadbacks;
 	unsigned mTextureHashPollFrame = ~0u;
 	void PollTextureHashReadbacks();
-	friend void EnsureTexture2DHashes(HackerContext *, ID3D11Resource *);
+	friend void EnsureTexture2DHashes(HackerContext *, ID3D11Resource *, bool, ResourceHandleInfo *);
 
 	// These private methods are utility routines for HackerContext.
 	void BeforeDraw(DrawContext &data);

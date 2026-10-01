@@ -455,7 +455,7 @@ struct ResourceHandleInfo
 		unsigned validation_frame = ~0u;
 		bool valid = false;
 	};
-	// Shared by LOD overrides, explicit MipHash and Match. Indexed by D3D subresource.
+	// Shared by LOD overrides, explicit mip-hash requests and Match. Indexed by D3D subresource.
 	std::vector<MipHashCache> mip_hash_cache;
 
 	// CPU-side copy of the resource data captured via hooks or staging buffer.
@@ -672,11 +672,8 @@ void PropagateTexture2DHashesForCopy(ID3D11Resource *dst, UINT dst_subresource,
 //
 // Refreshes the per-subresource LOD hashes when track_lod_hashes is on, and the
 // resource-level data hash when track_texture_updates == 1.
-void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource);
-// Synchronous CRC request. False means the subresource could not be hashed
-// (zero is a valid completed CRC).
-bool GetTexture2DMipHash(HackerContext *context, ID3D11Resource *resource,
-	UINT reverse_mip, UINT array_slice, uint32_t *hash, ResourceHandleInfo *fallback_info = nullptr);
+void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource,
+	bool force_lod_hashes = false, ResourceHandleInfo *fallback_info = nullptr);
 // Reads only completed, current CRCs. Used by ->Match without triggering a
 // broad GPU readback; includes legacy LOD CRCs when they are current.
 std::vector<uint32_t> GetCachedTexture2DMipHashes(ID3D11Resource *resource,

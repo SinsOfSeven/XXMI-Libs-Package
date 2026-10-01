@@ -1483,7 +1483,7 @@ void HackerContext::TrackAndDivertMap(HRESULT map_hr, ID3D11Resource *pResource,
 			//
 			// This only records the mapping: an entry whose orig_pData stays null
 			// is not diverted, and the guard below skips the divert path for it.
-			track = divert || selected_track_mips || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes;
+			track = divert || selected_track_mips || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->hunting;
 			break;
 
 		case D3D11_MAP_READ:
@@ -1612,7 +1612,7 @@ void HackerContext::TrackAndDivertUnmap(ID3D11Resource *pResource, UINT Subresou
 	//
 	// Explicit mip requests invalidate only this subresource; the legacy LOD
 	// matcher still refreshes the full resource. DISCARD can invalidate all mips.
-	if (map_info->mapped_writable && (G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
+	if (map_info->mapped_writable && (G->hunting || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
 		ResourceTracksMips(pResource)))
 		MarkTexture2DHashesDirty(pResource, map_info->mapped_discard ? ~0u : Subresource, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
 	if (mOrigContext1->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
@@ -2137,7 +2137,7 @@ STDMETHODIMP_(void) HackerContext::CopySubresourceRegion(THIS_
 	// CopySubresourceRegion is how a streamed texture usually gets its pixels - it
 	// is created empty, then filled a subresource at a time out of another
 	// resource - so this is the hook that makes those textures trackable at all.
-	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
+	if (G->hunting || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
 		ResourceTracksMips(pDstResource))
 		MarkTexture2DHashesDirty(pDstResource, DstSubresource, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
 	if (mOrigContext1->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
@@ -2189,7 +2189,7 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 				NULL                    // pSrcBox (can be NULL to copy whole buffer)
 			);
 
-			if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1)
+			if (G->hunting || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1)
 				MarkTexture2DHashesDirty(pDstResource, ~0u, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
 
 			return;
@@ -2200,10 +2200,10 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 
 	// Same as CopySubresourceRegion: the destination's contents may have changed,
 	// so flag rather than hash. The readback is deferred to the on-demand path.
-	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
+	if (G->hunting || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
 		ResourceTracksMips(pDstResource))
 		MarkTexture2DHashesDirty(pDstResource, ~0u, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
-	if ((G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes ||
+	if ((G->hunting || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes ||
 		G->track_texture_updates == 1 || ResourceTracksMips(pDstResource)) &&
 		mOrigContext1->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
 		pDstResource && pSrcResource && pDstResource != pSrcResource) {
@@ -2260,7 +2260,7 @@ STDMETHODIMP_(void) HackerContext::UpdateSubresource(THIS_
 	//
 	// A partial box invalidates the destination mip's complete CRC. Other mip
 	// requests stay clean; the legacy LOD matcher still refreshes the full chain.
-	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
+	if (G->hunting || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
 		ResourceTracksMips(pDstResource))
 		MarkTexture2DHashesDirty(pDstResource, DstSubresource, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
 	if (mOrigContext1->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
@@ -2329,7 +2329,7 @@ STDMETHODIMP_(void) HackerContext::GenerateMips(THIS_
 	ID3D11Resource *resource = nullptr;
 	pShaderResourceView->GetResource(&resource);
 	if (resource) {
-		if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes ||
+		if (G->hunting || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes ||
 			G->track_texture_updates == 1 || ResourceTracksMips(resource))
 			MarkTexture2DHashesDirty(resource, ~0u,
 				mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
@@ -2371,7 +2371,7 @@ STDMETHODIMP_(void) HackerContext::ResolveSubresource(THIS_
 
 	// The resolve wrote the destination subresource on the GPU, so flag its
 	// tracked hashes stale for the on-demand path to pick up.
-	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
+	if (G->hunting || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
 		ResourceTracksMips(pDstResource))
 		MarkTexture2DHashesDirty(pDstResource, DstSubresource, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
 }
@@ -3609,7 +3609,7 @@ void STDMETHODCALLTYPE HackerContext::CopySubresourceRegion1(
 	// Same as CopySubresourceRegion: the destination's contents may have changed,
 	// so flag its tracked hashes stale. The "1" variants are separate entry points
 	// the game can call directly, so they need the same treatment.
-	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
+	if (G->hunting || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
 		ResourceTracksMips(pDstResource))
 		MarkTexture2DHashesDirty(pDstResource,
 			CopyFlags & D3D11_COPY_DISCARD ? ~0u : DstSubresource, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
@@ -3641,7 +3641,7 @@ void STDMETHODCALLTYPE HackerContext::UpdateSubresource1(
 
 	// Same as UpdateSubresource: flag the tracked hashes stale rather than
 	// hashing here, so the readback only happens for slots a mod checks.
-	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
+	if (G->hunting || G->track_lod_hashes || G->track_lod_hash_updates || G->track_mip_hashes || G->track_texture_updates == 1 ||
 		ResourceTracksMips(pDstResource))
 		MarkTexture2DHashesDirty(pDstResource,
 			CopyFlags & D3D11_COPY_DISCARD ? ~0u : DstSubresource, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
@@ -3658,7 +3658,7 @@ void STDMETHODCALLTYPE HackerContext::DiscardResource(
 		ClearResourceRegionHashCache(pResource);
 
 	mOrigContext1->DiscardResource(pResource);
-	if (G->track_mip_hashes || ResourceTracksMips(pResource))
+	if (G->hunting || G->track_mip_hashes || ResourceTracksMips(pResource))
 		MarkTexture2DHashesDirty(pResource, ~0u, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
 }
 
@@ -3670,7 +3670,7 @@ void STDMETHODCALLTYPE HackerContext::DiscardView(
 	if (pResourceView) {
 		ID3D11Resource *resource = nullptr;
 		pResourceView->GetResource(&resource);
-		if (resource && (G->track_mip_hashes || ResourceTracksMips(resource)))
+		if (resource && (G->hunting || G->track_mip_hashes || ResourceTracksMips(resource)))
 			MarkTexture2DHashesDirty(resource, ~0u, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
 		if (resource)
 			resource->Release();
@@ -3916,7 +3916,7 @@ void STDMETHODCALLTYPE HackerContext::DiscardView1(
 	UINT NumRects)
 {
 	mOrigContext1->DiscardView1(pResourceView, pRects, NumRects);
-	if (G->track_mip_hashes && pResourceView) {
+	if ((G->hunting || G->track_mip_hashes) && pResourceView) {
 		ID3D11Resource *resource = nullptr;
 		pResourceView->GetResource(&resource);
 		MarkTexture2DHashesDirty(resource, ~0u, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);

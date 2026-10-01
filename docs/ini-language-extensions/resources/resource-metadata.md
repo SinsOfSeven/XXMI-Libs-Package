@@ -38,36 +38,7 @@ endif
 
 Resource attributes can be accessed using the `->` syntax.
 
-### `MipHash(reverse_mip, array_slice)`
-
-Requests the CRC32C of one Texture2D mip and encodes its **low 30 bits in a float**, using the same `EncodeFloat30` representation as `@resource`. This is independent of `checktextureoverride` and requires neither `track_lod_hashes` nor `track_lod_hash_updates`. Parsing a `->MipHash` expression automatically enables update tracking.
-
-```ini
-$smallest_hash = ps-t0->MipHash(0, 0)
-$next_hash = ps-t0->MipHash(1, 0)
-$slice_one_hash = ResourceTexture->MipHash(0, 1)
-
-if $smallest_hash
-    ; A completed hash is available, even when its CRC32C is zero.
-endif
-```
-
-Both arguments are required nonnegative integers; variables and expressions are accepted. Indices address the **underlying resource**, regardless of the bound view's mip or array range. Array slices use normal zero-based indexing. Mips use reverse indexing: `0` is the smallest allocated mip, `1` is the next larger mip. The native mip index is `MipLevels - 1 - reverse_mip`.
-
-Populating larger mips does not move these indices or invalidate hashes of untouched mips. If a game replaces a texture with a larger allocation, the same reverse index identifies the same dimensions only if the mip chains have the same smallest mip. Equal dimensions do not guarantee equal pixels. Unpopulated mip memory has no reliable content hash until the game initializes it; the API does not expose a populated-mip count.
-
-The first request for an unknown mip copies and maps that mip before returning its hash to the current command list. That map can wait for the GPU. A mip captured at creation or by a [`track_mips=1` override](lod-hashes.md) is already cached and needs no readback. Results are cached by the actual resource and subresource, not by `@resource` or the truncated hash. Writing another mip does not dirty this cache. Whole-resource copies, discards and mip generation may invalidate multiple entries. Deferred command-list execution conservatively invalidates cached mip hashes because its writes occur after recording. Render targets, depth textures, UAV textures and shared resources are conservatively refreshed each frame when requested.
-
-The cache follows the same useful rule as `cache_resource_data`: a write invalidates the affected cached value and the next explicit read refreshes it. The mip cache stores **full CRCs**, not a CPU copy of the image bytes; it works independently of the buffer-only `cache_resource_data` setting. `->Match(1234abcd)` can compare an eight-digit literal with any current mip CRC already cached for that resource, without initiating a readback. Evaluate `->MipHash(...)` first if the hash needs to be fetched in the current command list. The encoded INI float retains only 30 CRC bits; use the full `crc=` from frame analysis when writing a `->Match(...)` literal.
-
-| Result | Meaning |
-| --- | --- |
-| Nonzero float | Encoded low 30 bits of a completed CRC32C, including CRC zero |
-| `0` | No resource, non-Texture2D resource, invalid index, or unavailable hash |
-
-Multisampled textures and reads on deferred contexts are unsupported. The encoded value uses the same float format as `@resource`, but its input is the mip CRC rather than a hashed resource pointer. `lod_hash=` continues to use the full CRC32C and is unchanged.
-
-During frame analysis, fresh readbacks emit `miphash resource=... subresource=... reverse_mip=... array=... crc=... value30=...`. `value30` is the 30-bit payload before float encoding. Cache hits do not repeat that line. Use the raw pointer and subresource together to inspect a game's streaming behavior. Compare captures before and after streaming to determine whether it updates one resource or replaces it. The profiler includes these requests in its existing `track_lod_hashes` row.
+Mip CRCs are queried with [`->Match(hash)`](#match). Use the [`ensuremiphashes` command](../commands/README.md#ensuremiphashes) to request an asynchronous refresh. The cache stores full CRCs and is independent of the buffer-only `cache_resource_data` setting. A frame-analysis entry `lod=[CRC@subresource ...]` uses `subresource = mip + array_slice * mip_levels`.
 
 ### `BindFlags`
 

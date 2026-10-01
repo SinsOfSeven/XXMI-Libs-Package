@@ -189,7 +189,7 @@ static void update_txt_summary(LARGE_INTEGER collection_duration, LARGE_INTEGER 
 			    L"   Map/Unmap overhead: %7.2fus/frame ~%ffps\n"
 			    L"track_texture_updates: %7.2fus/frame ~%ffps (%u/%u hits/frame)\n"
 		        L"  track_region_hashes: %7.2fus/frame ~%ffps\n"
-			    L"     track_lod_hashes: %7.2fus/frame ~%ffps\n"
+			    L"     track_lod_hashes: %7.2fus/frame ~%ffps (%u/%u queued/frame)\n"
 			    L"  dump_usage overhead: %7.2fus/frame ~%ffps\n"
 			    L" ShaderRegex overhead: %7.2fus/frame ~%ffps\n"
 			    L"Mouse cursor overhead: %7.2fus/frame ~%ffps\n"
@@ -219,6 +219,8 @@ static void update_txt_summary(LARGE_INTEGER collection_duration, LARGE_INTEGER 
 
 				(float)lod_hash_tracking_overhead.QuadPart / frames,
 				60.0 * lod_hash_tracking_overhead.QuadPart / collection_duration.QuadPart,
+				Profiling::lod_hash_tracking_overhead.hits / frames,
+				Profiling::lod_hash_tracking_overhead.count / frames,
 
 			    (float)stat_overhead.QuadPart / frames,
 			    60.0 * stat_overhead.QuadPart / collection_duration.QuadPart,
