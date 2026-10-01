@@ -239,4 +239,3 @@ int main() {
     printf("\n%s (%d failures)\n", fails ? "FAILURES" : "ALL PASSED", fails);
     return fails != 0;
 }
-

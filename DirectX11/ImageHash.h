@@ -16,23 +16,20 @@
 //
 // The exact per-subresource CRCs in ResourceHash.cpp answer "are these bytes
 // identical", which is the right question for a texture the game uploaded once
-// and never touches again. They cannot answer "is this the same image", because
-// two mip levels of one source texture are different bytes by construction, and
-// two different textures can be pixel-identical. That is what this is for.
+// and never touches again. They cannot answer "is this the same image": two mip
+// levels or differently encoded copies can depict the same source with
+// different bytes. That is what this is for.
 //
 // Everything here works on a single subresource at a time and never assumes a
-// mip chain, a resource, or a game-specific texture ordering. The intended flow
-// is: narrow the candidates cheaply (a mesh or a description filter), then
-// compare a small number of candidate textures against one signature a mod
-// declares. Nothing here tries to associate two textures *with each other*,
-// which is deliberately out of scope - see the notes on grouping in ImageHash.cpp.
+// mip chain, a resource, or a game-specific texture ordering. A future caller
+// should narrow candidates before computing signatures. This library does not
+// associate textures with each other; see the notes in ImageHash.cpp.
 
 // One subresource's worth of CPU-visible pixels.
 //
 // Deliberately non-owning: it points at memory owned by the caller (the game's
 // pInitialData during CreateTexture2D, or pSrcData during UpdateSubresource).
-// Nothing in here reads after the owner has let go, which is why the frame
-// analysis path only ever computes a signature synchronously.
+// A caller must compute a signature before the owner releases that memory.
 struct ImageSurface
 {
 	const uint8_t *data = nullptr;
@@ -65,9 +62,8 @@ UINT ImageFormatBitsPerPixel(DXGI_FORMAT format);
 bool ImageFormatHasDecoder(DXGI_FORMAT format);
 
 // Describes one subresource of a texture without reading any pixels. `data` may
-// be null, which produces a surface that is not valid() - used by the frame
-// analysis path to report a subresource's dimensions and decide whether it is
-// worth reading. `mip` and `array_slice` are independent; callers holding a
+// be null, which produces a surface that is not valid() but still describes
+// dimensions. `mip` and `array_slice` are independent; callers holding a
 // single subresource index should use
 // `init_image_surface_from_subresource` instead.
 void init_image_surface_from_desc(const D3D11_TEXTURE2D_DESC *desc, UINT mip,
@@ -95,15 +91,14 @@ struct ImageHash
 	bool operator==(const ImageHash &other) const { return bytes == other.bytes; }
 };
 
-// Base class for a fingerprint algorithm. Pluggable via phash_algorithm = so a
-// mod can pick a signature, with the intent that none of them is precious: a
-// different algorithm is an authoring choice, not a correctness hazard.
+// Base class for a fingerprint algorithm. The registry lets a future caller
+// choose an algorithm without baking its name into the decoding path.
 class IImageHashAlgorithm
 {
 public:
 	virtual ~IImageHashAlgorithm() = default;
 
-	// Name as written in phash_algorithm =, e.g. "avg8".
+	// Registry name, e.g. "avg8".
 	virtual const char *name() const = 0;
 
 	// Number of set bits, which for the packing above is the signature length in
@@ -124,8 +119,7 @@ public:
 // algorithm. Never returns nullptr for a name the registry advertises.
 const IImageHashAlgorithm *find_image_hash_algorithm(const char *name);
 
-// Names of every registered algorithm, for logging an unknown phash_algorithm
-// value usefully and for documenting the ini.
+// Names of every registered algorithm, for diagnostics and caller discovery.
 std::vector<std::string> image_hash_algorithm_names();
 
 // Computes a signature with the named algorithm, returning an empty hash if the
@@ -138,6 +132,5 @@ ImageHash compute_image_hash(const char *algorithm, const ImageSurface &surface)
 // from "could not be computed for this format".
 std::vector<std::pair<std::string, ImageHash>> compute_all_image_hashes(const ImageSurface &surface);
 
-// A signature rendered as lowercase hex, for logging, frame analysis dumps and
-// the phash = ini key. Empty when the hash is empty.
+// A signature rendered as lowercase hex. Empty when the hash is empty.
 std::string image_hash_to_hex(const ImageHash &hash);
