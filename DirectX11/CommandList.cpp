@@ -1562,9 +1562,8 @@ static UINT get_index_count_from_current_ib(ID3D11DeviceContext *mOrigContext1)
 	return 0;
 }
 
-// Clears the per-draw metadata before a draw command runs, so
-// previous_draw_type reflects the most recent draw to actually execute and
-// leaves nothing stale from an earlier draw in the same command list run. The
+// Clears the per-draw metadata when recording a completed draw, so
+// previous_draw_type reflects the most recent draw to execute. The
 // run-scoped accumulated counts are deliberately left untouched - they reset
 // once when the run starts instead, so they keep summing across every draw.
 static void ResetPreviousDraw(CommandListState *state)

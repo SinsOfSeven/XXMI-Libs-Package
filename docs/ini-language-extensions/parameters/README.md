@@ -58,8 +58,8 @@ $fps = FPS
 
 ## Accumulated draw parameters
 
-A set of read-only parameters that total the element counts of every draw
-command actually executed within the current command list run. Unlike the
+A set of read-only parameters that sum the count **arguments** of draw
+commands executed within the current command list run. Unlike the
 draw-context parameters (`VERTEX_COUNT`, `FIRST_INDEX`, etc.), which report a
 single draw call, the accumulated values keep a running sum across the whole
 run. Because a given draw only adds to the counter matching its own draw
@@ -67,10 +67,13 @@ type, an override can recover an individual draw by diffing the counter that
 `PREVIOUS_DRAW_TYPE` points at against a value captured at the start of its
 block.
 
-The counts only accumulate while the application has a **stream output
-buffer bound** - they describe what has been written into that buffer, not
-arbitrary draw traffic. Consequently they reset whenever the stream output
-bindings change (each `SOSetTargets` call starts a new accumulation window):
+The counts only accumulate while a **stream output buffer is bound**. They do
+not measure vertices or primitives actually emitted by the shader: geometry
+shader amplification, instancing, clipping and `DrawAuto` cannot be recovered
+from the CPU draw arguments. The vertex/index argument is added once per draw,
+while the instance argument is accumulated separately. The counters reset
+whenever the stream output bindings change (each `SOSetTargets` call starts a
+new accumulation window):
 a fresh run starts at `0`, and an in-run (re)bind zeroes the counts against
 the new bindings.
 
@@ -87,7 +90,7 @@ actually executed within the current command list run**.
 
 | Parameter | Description |
 |---|---|
-| `PREVIOUS_DRAW_TYPE` | `DrawCall` enum value of the last draw command (same value scheme as `draw_type`), `0` if nothing has been constructed yet |
+| `PREVIOUS_DRAW_TYPE` | `DrawCall` enum value of the last executed draw command (same value scheme as `draw_type`), `0` if none has executed yet |
 
 All accumulated values are `0` at the start of each command list run and
 update only when a draw command actually executes. Skipped or failed draws
@@ -97,6 +100,7 @@ command list remain visible in nested command lists executed within the same
 override block; this is useful for coordinating actions between mods.
 
 ```ini
+; With a stream output target bound:
 $start = accumulated_vertex_count ; 0.0
 draw = 100, 0
 $drawn = accumulated_vertex_count - $start ; 100.0
