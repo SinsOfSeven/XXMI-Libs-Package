@@ -1,4 +1,5 @@
 #include "ShaderBytecodeRecord.h"
+#include "ShaderBytecodeValidation.h"
 
 #include <algorithm>
 #include <atomic>
@@ -129,7 +130,7 @@ bool ShaderBytecodeRecordStore::persist_metadata()
 
 	header.record_count = (uint32_t)records.size();
 
-	// The metadata is persisted atomically by shader_store_metadata_write().
+	// The metadata is persisted atomically by blob_store_metadata_write().
 	// The blob is always appended to *before* this runs, so the persisted
 	// metadata never references bytecode that isn't on disk yet:
 	size_t size = sizeof(ShaderBytecodeRecordFileHeader)
@@ -142,7 +143,7 @@ bool ShaderBytecodeRecordStore::persist_metadata()
 		memcpy(out.data() + sizeof(ShaderBytecodeRecordFileHeader),
 				records.data(), records.size() * sizeof(ShaderBytecodeRecordEntry));
 
-	if (!shader_store_metadata_write(dat_path, out.data(), out.size())) {
+	if (!blob_store_metadata_write(dat_path, out.data(), out.size())) {
 		LogWarning("ShaderBytecodeRecord: persist_metadata write to %S FAILED (records=%u size=%Iu)\n",
 				dat_path, header.record_count, size);
 		return false;
@@ -159,7 +160,7 @@ bool ShaderBytecodeRecordStore::metadata_load(const wchar_t *dat_path)
 {
 	std::vector<uint8_t> buf;
 
-	if (!shader_store_metadata_read(dat_path, &buf))
+	if (!blob_store_metadata_read(dat_path, &buf))
 		return false;
 
 	if (buf.size() < sizeof(ShaderBytecodeRecordFileHeader))
@@ -202,7 +203,7 @@ bool ShaderBytecodeRecordStore::metadata_load(const wchar_t *dat_path)
 		// Only a claimed block has to be aligned and inside the blob.
 		if (r.blob_size
 		 && (r.blob_offset % BlobStore::block_alignment()
-		 || !shader_store_range_valid(r.blob_offset, r.blob_size, file_header.blob_size)))
+		 || !blob_store_range_valid(r.blob_offset, r.blob_size, file_header.blob_size)))
 			return false;
 
 		prev = r;
@@ -239,8 +240,8 @@ void ShaderBytecodeRecordStore::wipe_files()
 
 	reset_state();
 
-	shader_store_delete(dat_path);
-	shader_store_delete(blob_path);
+	blob_store_delete(dat_path);
+	blob_store_delete(blob_path);
 }
 
 bool ShaderBytecodeRecordStore::create_metadata()
@@ -359,7 +360,7 @@ bool ShaderBytecodeRecordStore::load(UINT64 hash, const wchar_t *shader_type, st
 	bytecode->resize(record->blob_size);
 	uint32_t version;
 	return blob.read(record->blob_offset, record->blob_size, bytecode->data())
-			&& shader_store_dxbc_version(bytecode->data(), bytecode->size(), &version)
+			&& shader_bytecode_dxbc_version(bytecode->data(), bytecode->size(), &version)
 			&& shader_stage_from_dxbc_type(version >> 16) == stage;
 }
 
@@ -407,7 +408,7 @@ void ShaderBytecodeRecordStore::save(UINT64 hash, const wchar_t *shader_type, co
 	// persisting it would only strand a dead block. An unledgered shader just
 	// costs a re-analysis next session; a poisoned ledger costs every session.
 	uint32_t dxbc_version;
-	if (!shader_store_dxbc_version(bytecode->data(), bytecode->size(), &dxbc_version)
+	if (!shader_bytecode_dxbc_version(bytecode->data(), bytecode->size(), &dxbc_version)
 	 || shader_stage_from_dxbc_type(dxbc_version >> 16) != stage) {
 		LogWarning("ShaderBytecodeRecord: save %S %016I64x skipped - not valid %S bytecode\n",
 				shader_type, hash, shader_type);

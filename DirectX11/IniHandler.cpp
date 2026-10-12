@@ -15,7 +15,7 @@
 #include "Override.h"
 #include "Hunting.h"
 #include "ShaderRegex.h"
-#include "ShaderStore.h"
+#include "BlobStore.h"
 #include "ShaderBytecodeRecord.h"
 #include "cursor.h"
 #include <chrono>
@@ -4450,13 +4450,6 @@ void BuildTextureOverrideDrawMaps()
 	}
 }
 
-uint64_t BlobStore::read_ahead_size()
-{
-	// Keep configuration access here so the storage code has no Globals dependency.
-	int raw = G->SHADER_CACHE_READ_AHEAD.load(std::memory_order_relaxed);
-	return clamp_read_ahead(raw > 0 ? (uint64_t)raw : 0);
-}
-
 void LoadConfigFile()
 {
 	wchar_t iniFile[MAX_PATH], logFilename[MAX_PATH];
@@ -4732,7 +4725,7 @@ void LoadConfigFile()
 	if (clamped != (uint64_t)read_ahead)
 		LogWarning("shader_cache_read_ahead: %d exceeds the %Iu byte maximum, clamping\n",
 				read_ahead, BlobStore::read_ahead_max());
-	G->SHADER_CACHE_READ_AHEAD = (int)clamped;
+	BlobStore::set_read_ahead_size(clamped);
 	G->SCISSOR_DISABLE = GetIniBool(L"Rendering", L"rasterizer_disable_scissor", false, NULL);
 	G->track_texture_updates = GetIniBoolOrInt(L"Rendering", L"track_texture_updates", 0, NULL);
 

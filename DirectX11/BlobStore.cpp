@@ -1,10 +1,25 @@
-#include "ShaderStore.h"
+#include "BlobStore.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <windows.h>
 
 #include "log.h"
+
+namespace {
+std::atomic<uint64_t> configured_read_ahead{BlobStore::read_ahead_default()};
+}
+
+uint64_t BlobStore::read_ahead_size()
+{
+    return configured_read_ahead.load(std::memory_order_relaxed);
+}
+
+void BlobStore::set_read_ahead_size(uint64_t size)
+{
+    configured_read_ahead.store(clamp_read_ahead(size), std::memory_order_relaxed);
+}
 
 BlobStore::~BlobStore()
 {
@@ -49,7 +64,7 @@ bool BlobStore::ensure_open(bool create)
 			FILE_SHARE_READ | FILE_SHARE_WRITE, 0,
 			create ? OPEN_ALWAYS : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (f == INVALID_HANDLE_VALUE) {
-		LogWarning("ShaderStore: ensure_open(%S, create=%d) FAILED (last error %u)\n",
+		LogWarning("BlobStore: ensure_open(%S, create=%d) FAILED (last error %u)\n",
 				path.c_str(), (int)create, (unsigned)GetLastError());
 		return false;
 	}
@@ -108,14 +123,14 @@ bool BlobStore::append(const uint8_t *data, size_t size, uint64_t *out_offset)
 	LARGE_INTEGER li;
 	li.QuadPart = (LONGLONG)offset;
 	if (!SetFilePointerEx(f, li, NULL, FILE_BEGIN)) {
-		LogWarning("ShaderStore: append SetFilePointerEx(%Iu) FAILED (last error %u)\n",
+		LogWarning("BlobStore: append SetFilePointerEx(%Iu) FAILED (last error %u)\n",
 				(uint64_t)offset, (unsigned)GetLastError());
 		return false;
 	}
 
 	DWORD wrote;
 	if (size && (!WriteFile(f, data, (DWORD)size, &wrote, NULL) || wrote != size)) {
-		LogWarning("ShaderStore: append WriteFile(%Iu) FAILED (last error %u)\n",
+		LogWarning("BlobStore: append WriteFile(%Iu) FAILED (last error %u)\n",
 				(uint64_t)size, (unsigned)GetLastError());
 		return false;
 	}
@@ -123,7 +138,7 @@ bool BlobStore::append(const uint8_t *data, size_t size, uint64_t *out_offset)
 	while (pad) {
 		size_t chunk = (std::min)(pad, sizeof(zeros));
 		if (!WriteFile(f, zeros, (DWORD)chunk, &wrote, NULL) || wrote != chunk) {
-			LogWarning("ShaderStore: append pad WriteFile FAILED (last error %u)\n",
+			LogWarning("BlobStore: append pad WriteFile FAILED (last error %u)\n",
 					(unsigned)GetLastError());
 			return false;
 		}
@@ -141,20 +156,20 @@ bool BlobStore::read(uint64_t offset, uint32_t size, uint8_t *dst)
 {
 	if (!size)
 		return true;
-	if (!shader_store_range_valid(offset, size, blob_logical_end) || offset > INT64_MAX)
+	if (!dst || !blob_store_range_valid(offset, size, blob_logical_end) || offset > INT64_MAX)
 		return false;
 
 	// The most recently read blocks stay in the window, so re-reads of a
 	// block during the same session (e.g. after a config reload re-linked the
 	// command lists) are served straight from memory:
-	if (window_valid && offset >= window_start
-	 && shader_store_range_valid(offset - window_start, size, window.size())) {
+	if (read_policy == ReadPolicy::Windowed && window_valid && offset >= window_start
+	 && blob_store_range_valid(offset - window_start, size, window.size())) {
 		memcpy(dst, window.data() + (size_t)(offset - window_start), size);
 		return true;
 	}
 
 	if (!ensure_open(false)) {
-		LogWarning("ShaderStore: read open FAILED (offset %Iu size %u)\n",
+		LogWarning("BlobStore: read open FAILED (offset %Iu size %u)\n",
 				(uint64_t)offset, size);
 		return false;
 	}
@@ -162,13 +177,30 @@ bool BlobStore::read(uint64_t offset, uint32_t size, uint8_t *dst)
 	LARGE_INTEGER li;
 	li.QuadPart = (LONGLONG)offset;
 	if (!SetFilePointerEx(f, li, NULL, FILE_BEGIN)) {
-		LogWarning("ShaderStore: read SetFilePointerEx(%Iu) FAILED (last error %u)\n",
+		LogWarning("BlobStore: read SetFilePointerEx(%Iu) FAILED (last error %u)\n",
 				(uint64_t)offset, (unsigned)GetLastError());
 		return false;
 	}
 
+	if (read_policy == ReadPolicy::Exact) {
+		uint32_t done = 0;
+		while (done < size) {
+			DWORD chunk = (std::min<DWORD>)(size - done, exact_read_chunk_size());
+			DWORD got = 0;
+			BOOL ok = ReadFile(f, dst + done, chunk, &got, NULL);
+			if (!ok || !got) {
+				DWORD error = ok ? ERROR_HANDLE_EOF : GetLastError();
+				LogWarning("BlobStore: exact read failed (%u bytes at %Iu, last error %u)\n",
+						chunk, offset + done, (unsigned)error);
+				return false;
+			}
+			done += got;
+		}
+		return true;
+	}
+
 	DWORD got;
-	// Exact reads avoid copying on-disk padding on isolated requests.
+	// Isolated windowed reads avoid copying on-disk padding.
 	uint64_t want = size;
 	uint64_t ahead = read_ahead_size();
 	// Nearby forward misses get speculative read-ahead. Random traffic can also
@@ -182,7 +214,7 @@ bool BlobStore::read(uint64_t offset, uint32_t size, uint8_t *dst)
 			blob_logical_end - offset);
 	window.resize(to_read);
 	if (!ReadFile(f, window.data(), (DWORD)to_read, &got, NULL) || got != to_read) {
-		LogWarning("ShaderStore: read ReadFile(%Iu@%Iu) FAILED (last error %u)\n",
+		LogWarning("BlobStore: read ReadFile(%Iu@%Iu) FAILED (last error %u)\n",
 				(uint64_t)to_read, (uint64_t)offset, (unsigned)GetLastError());
 		window_valid = false;
 		return false;
@@ -195,16 +227,16 @@ bool BlobStore::read(uint64_t offset, uint32_t size, uint8_t *dst)
 	return true;
 }
 
-bool shader_store_metadata_write(const wchar_t *path, const void *data, size_t size)
+bool blob_store_metadata_write(const wchar_t *path, const void *data, size_t size)
 {
-	if (size > SHADER_STORE_METADATA_MAX)
+	if (size > BLOB_STORE_METADATA_MAX)
 		return false;
 	std::wstring tmp(path);
 	tmp += L".tmp";
 
 	HANDLE f = CreateFile(tmp.c_str(), GENERIC_WRITE, FILE_SHARE_READ, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (f == INVALID_HANDLE_VALUE) {
-		LogWarning("ShaderStore: metadata write create %S FAILED (last error %u)\n",
+		LogWarning("BlobStore: metadata write create %S FAILED (last error %u)\n",
 				tmp.c_str(), (unsigned)GetLastError());
 		return false;
 	}
@@ -216,21 +248,21 @@ bool shader_store_metadata_write(const wchar_t *path, const void *data, size_t s
 	CloseHandle(f);
 
 	if (!ok) {
-		LogWarning("ShaderStore: metadata write to %S FAILED (size=%Iu, last error %u)\n",
+		LogWarning("BlobStore: metadata write to %S FAILED (size=%Iu, last error %u)\n",
 				tmp.c_str(), size, (unsigned)GetLastError());
 		DeleteFile(tmp.c_str());
 		return false;
 	}
 
 	if (!MoveFileEx(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-		LogWarning("ShaderStore: metadata rename %S -> %S FAILED (last error %u)\n",
+		LogWarning("BlobStore: metadata rename %S -> %S FAILED (last error %u)\n",
 				tmp.c_str(), path, (unsigned)GetLastError());
 		return false;
 	}
 	return true;
 }
 
-bool shader_store_metadata_read(const wchar_t *path, std::vector<uint8_t> *out)
+bool blob_store_metadata_read(const wchar_t *path, std::vector<uint8_t> *out)
 {
 	out->clear();
 
@@ -242,7 +274,7 @@ bool shader_store_metadata_read(const wchar_t *path, std::vector<uint8_t> *out)
 	DWORD read_bytes = 0;
 	bool ok = false;
 
-	if (GetFileSizeEx(f, &size) && size.QuadPart >= 0 && size.QuadPart <= SHADER_STORE_METADATA_MAX) {
+	if (GetFileSizeEx(f, &size) && size.QuadPart >= 0 && size.QuadPart <= BLOB_STORE_METADATA_MAX) {
 		out->resize((size_t)size.QuadPart);
 		ok = out->empty() || (ReadFile(f, out->data(), (DWORD)out->size(), &read_bytes, NULL)
 				&& read_bytes == out->size());
@@ -251,51 +283,19 @@ bool shader_store_metadata_read(const wchar_t *path, std::vector<uint8_t> *out)
 	CloseHandle(f);
 
 	if (!ok)
-		LogWarning("ShaderStore: metadata read %S FAILED (last error %u)\n", path, (unsigned)GetLastError());
+		LogWarning("BlobStore: metadata read %S FAILED (last error %u)\n", path, (unsigned)GetLastError());
 
 	return ok;
 }
 
-bool shader_store_dxbc_version(const void *data, size_t size, uint32_t *version)
-{
-	if (!data || size < 32 || size > UINT32_MAX || memcmp(data, "DXBC", 4))
-		return false;
-	const uint8_t *bytes = (const uint8_t *)data;
-	uint32_t total, count;
-	memcpy(&total, bytes + 24, 4);
-	memcpy(&count, bytes + 28, 4);
-	if (total != size || !count || count > (size - 32) / 4)
-		return false;
-	bool found = false;
-	for (uint32_t i = 0; i < count; ++i) {
-		uint32_t offset, length;
-		memcpy(&offset, bytes + 32 + i * 4, 4);
-		if (offset < 32 + (uint64_t)count * 4 || !shader_store_range_valid(offset, 8, size))
-			return false;
-		memcpy(&length, bytes + offset + 4, 4);
-		if (!shader_store_range_valid((uint64_t)offset + 8, length, size))
-			return false;
-		if (!memcmp(bytes + offset, "SHEX", 4) || !memcmp(bytes + offset, "SHDR", 4)) {
-			if (length < 8 || length % 4)
-				return false;
-			uint32_t words;
-			memcpy(version, bytes + offset + 8, 4);
-			memcpy(&words, bytes + offset + 12, 4);
-			if (words != length / 4 || (*version >> 16) > 5)
-				return false;
-			found = true;
-		}
-	}
-	return found;
-}
 
-void shader_store_delete(const wchar_t *path)
+void blob_store_delete(const wchar_t *path)
 {
 	if (DeleteFile(path))
 		return;
 
 	DWORD err = GetLastError();
 	if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND)
-		LogWarning("ShaderStore: delete %S FAILED (last error %u) - stale file will remain\n",
+		LogWarning("BlobStore: delete %S FAILED (last error %u) - stale file will remain\n",
 				path, (unsigned)err);
 }

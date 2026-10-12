@@ -21,7 +21,8 @@
     <ClCompile Include="..\D3D_Shaders\SignatureParser.cpp" />
     <ClCompile Include="ShaderBytecodeRecord.cpp" />
     <ClCompile Include="ShaderRegex.cpp" />
-    <ClCompile Include="ShaderStore.cpp" />
+    <ClCompile Include="BlobStore.cpp" />
+    <ClCompile Include="ShaderBytecodeValidation.cpp" />
     <ClCompile Include="HookAddresses.c" />
     <ClCompile Include="HackerDXGI.cpp" />
     <ClCompile Include="..\iid.cpp" />
@@ -62,7 +63,8 @@
     <ClInclude Include="ShaderBytecodeRecord.h" />
     <ClInclude Include="ShaderRegex.h" />
     <ClInclude Include="ShaderStage.h" />
-    <ClInclude Include="ShaderStore.h" />
+    <ClInclude Include="BlobStore.h" />
+    <ClInclude Include="ShaderBytecodeValidation.h" />
     <ClInclude Include="FrameAnalysis.h" />
     <ClInclude Include="HackerDXGI.h" />
     <ClInclude Include="profiling.h" />

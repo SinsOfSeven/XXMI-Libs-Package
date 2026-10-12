@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "ShaderStage.h"
-#include "ShaderStore.h"
+#include "BlobStore.h"
 
 // The ledger is deliberately NOT generation-keyed, unlike ShaderRegexCache: the
 // bytecode it holds is the game's original, unpatched shader, which is valid

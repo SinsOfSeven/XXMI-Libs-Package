@@ -503,12 +503,6 @@ struct Globals
 	int EXPORT_HLSL;		// 0=off, 1=HLSL only, 2=HLSL+OriginalASM, 3= HLSL+OriginalASM+recompiledASM
 	bool EXPORT_SHADERS, EXPORT_FIXED, EXPORT_BINARY, CACHE_SHADERS, SCISSOR_DISABLE;
 	bool DISABLE_REGEX_CACHE;
-	// Read-ahead target for the packed shader cache blob, in bytes. 0 disables
-	// read-ahead entirely (each read fetches just its own block, which is
-	// correct but never reuses). Atomic because BlobStore::read_ahead_size()
-	// loads it on the read path without holding the cache mutex, so a config
-	// reload may write it concurrently; see BlobStore in ShaderStore.h.
-	std::atomic<int> SHADER_CACHE_READ_AHEAD;
 	int track_texture_updates;
 	bool assemble_signature_comments;
 	bool disassemble_undecipherable_custom_data;
@@ -727,7 +721,6 @@ struct Globals
 		EXPORT_BINARY(false),
 		CACHE_SHADERS(false),
 		DISABLE_REGEX_CACHE(false),
-		SHADER_CACHE_READ_AHEAD(128 * 1024),
 		DumpUsage(false),
 		ENABLE_TUNE(false),
 		gTuneStep(0.001f),
