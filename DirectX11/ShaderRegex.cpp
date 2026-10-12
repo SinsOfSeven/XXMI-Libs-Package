@@ -1,6 +1,7 @@
 #include "ShaderRegex.h"
 #include "ShaderStage.h"
-#include "ShaderStore.h"
+#include "BlobStore.h"
+#include "ShaderBytecodeValidation.h"
 #include "CommandList.h"
 #include "globals.h" // For ShaderOverride FIXME: This should be in a separate header
 #include "log.h"
@@ -571,7 +572,7 @@ private:
 	std::atomic<bool> metadata_dirty{ false };
 
 	// Grow-only bytecode blob, streamed through a small sliding window (see
-	// ShaderStore.h). Shared between the cache stores so the same machinery
+	// BlobStore.h). Shared between the cache stores so the same machinery
 	// backs the ShaderBytecodeRecord ledger as well:
 	BlobStore blob;
 
@@ -653,7 +654,7 @@ bool ShaderRegexCacheStore::persist_metadata()
 	header.record_count = (uint32_t)records.size();
 	header.match_pool_count = (uint32_t)match_pool.size();
 
-	// The metadata is persisted by shader_store_metadata_write() to a temp
+	// The metadata is persisted by blob_store_metadata_write() to a temp
 	// file that is atomically renamed over the real file so a crash at any
 	// point can never leave a half-written cache behind. The blob is always
 	// appended to *before* this runs, so the persisted metadata never
@@ -661,7 +662,7 @@ bool ShaderRegexCacheStore::persist_metadata()
 	size = sizeof(ShaderRegexCacheHeader)
 			+ records.size() * sizeof(ShaderRegexCacheRecord)
 			+ match_pool.size() * sizeof(uint32_t);
-	if (size > SHADER_STORE_METADATA_MAX)
+	if (size > BLOB_STORE_METADATA_MAX)
 		return false;
 
 	out.resize(size);
@@ -675,7 +676,7 @@ bool ShaderRegexCacheStore::persist_metadata()
 	if (!match_pool.empty())
 		memcpy(out.data() + pool_offset, match_pool.data(), match_pool.size() * sizeof(uint32_t));
 
-	if (!shader_store_metadata_write(dat_path, out.data(), out.size())) {
+	if (!blob_store_metadata_write(dat_path, out.data(), out.size())) {
 		LogWarning("ShaderRegexCache: persist_metadata write to %S FAILED (records=%u match_pool=%u size=%Iu)\n",
 				dat_path, header.record_count, header.match_pool_count, size);
 		return false;
@@ -692,7 +693,7 @@ bool ShaderRegexCacheStore::metadata_load(const wchar_t *dat_path)
 {
 	std::vector<byte> buf;
 
-	if (!shader_store_metadata_read(dat_path, &buf))
+	if (!blob_store_metadata_read(dat_path, &buf))
 		return false;
 
 	if (buf.size() < sizeof(ShaderRegexCacheHeader))
@@ -742,11 +743,11 @@ bool ShaderRegexCacheStore::metadata_load(const wchar_t *dat_path)
 			return false;
 		if (r.shader_type >= ShaderStage::COUNT)
 			return false;
-		if (!shader_store_range_valid(r.match_pool_index, r.match_count, file_header.match_pool_count))
+		if (!blob_store_range_valid(r.match_pool_index, r.match_count, file_header.match_pool_count))
 			return false;
 		if (r.blob_size
 		 && (r.blob_offset % BlobStore::block_alignment()
-		 || !shader_store_range_valid(r.blob_offset, r.blob_size, file_header.blob_size)))
+		 || !blob_store_range_valid(r.blob_offset, r.blob_size, file_header.blob_size)))
 			return false;
 		if (r.patched > 1 || (r.patched && !r.match_count))
 			return false;
@@ -786,8 +787,8 @@ void ShaderRegexCacheStore::wipe_files()
 
 	reset_state();
 
-	shader_store_delete(dat_path);
-	shader_store_delete(blob_path);
+	blob_store_delete(dat_path);
+	blob_store_delete(blob_path);
 }
 
 bool ShaderRegexCacheStore::create_metadata()
@@ -936,7 +937,7 @@ ShaderRegexCache ShaderRegexCacheStore::load(UINT64 hash, const wchar_t *shader_
 		bytecode->resize(record->blob_size);
 		uint32_t version;
 		if (!blob.read(record->blob_offset, record->blob_size, bytecode->data())
-		 || !shader_store_dxbc_version(bytecode->data(), bytecode->size(), &version)
+		 || !shader_bytecode_dxbc_version(bytecode->data(), bytecode->size(), &version)
 		 || shader_stage_from_dxbc_type(version >> 16) != stage)
 			return shader_regex_cache_fail(reason, ShaderRegexCacheFailureReason::BLOB_READ_FAILED);
 	}
@@ -1026,7 +1027,7 @@ void ShaderRegexCacheStore::save_meta(UINT64 hash, const wchar_t *shader_type, v
 		// record is a conservative allowance when this is an update.
 		uint64_t required = sizeof(header) + (uint64_t)(records.size() + 1) * sizeof(ShaderRegexCacheRecord)
 				+ ((uint64_t)match_pool.size() + match_ids->size()) * sizeof(uint32_t);
-		if (required > SHADER_STORE_METADATA_MAX)
+		if (required > BLOB_STORE_METADATA_MAX)
 			return;
 		record = find_or_insert_record(stage, hash);
 		if (!record) {
@@ -1106,7 +1107,7 @@ void ShaderRegexCacheStore::save_bin(UINT64 hash, const wchar_t *shader_type, ve
 	// Validate before appending: load() refuses anything this rejects, so a bad
 	// assemble would strand a dead block and cost a re-analysis every session.
 	uint32_t dxbc_version;
-	if (!shader_store_dxbc_version(bytecode->data(), bytecode->size(), &dxbc_version)
+	if (!shader_bytecode_dxbc_version(bytecode->data(), bytecode->size(), &dxbc_version)
 	 || shader_stage_from_dxbc_type(dxbc_version >> 16) != stage) {
 		LogWarning("ShaderRegexCache: save_bin %S %016I64x skipped - assembled output is not valid %S bytecode\n",
 				shader_type, hash, shader_type);
