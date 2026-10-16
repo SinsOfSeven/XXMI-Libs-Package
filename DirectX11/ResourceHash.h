@@ -11,6 +11,7 @@
 
 #include "util.h"
 #include "DrawCallInfo.h"
+#include "Filter.h"
 
 // A cache-friendly hash table implementation using:
 // - Contiguous storage(std::vector)
@@ -611,6 +612,9 @@ uint32_t CalcTexture3DDataHash(const D3D11_TEXTURE3D_DESC *pDesc, const D3D11_SU
 ResourceHandleInfo* GetResourceHandleInfo(ID3D11Resource *resource);
 uint32_t GetOrigResourceHash(ID3D11Resource *resource);
 uint32_t GetResourceHash(ID3D11Resource *resource);
+// Thread-safe wrapper around GetResourceHash() that acquires the critical
+// section. Returns 0 if the resource has not been hashed.
+uint32_t GetResourceHashSafe(ID3D11Resource *resource);
 static bool CacheBufferData(HackerContext* context, ID3D11Buffer* buffer, ResourceHandleInfo* info);
 void ClearResourceRegionHashCache(ID3D11Resource* resource);
 UINT GetVertexBufferRegionOffset(UINT stride, DrawCallInfo* call_info, UINT byte_offset);
@@ -758,48 +762,7 @@ static EnumName_t<const wchar_t *, ResourceMiscFlags> ResourceMiscFlagNames[] = 
 	{NULL, ResourceMiscFlags::INVALID} // End of list marker
 };
 
-enum class FuzzyMatchOp {
-	ALWAYS,
-	EQUAL,
-	LESS,
-	LESS_EQUAL,
-	GREATER,
-	GREATER_EQUAL,
-	NOT_EQUAL,
-};
-
-enum class FuzzyMatchOperandType {
-	VALUE,
-	WIDTH,      // Width, Height & Depth useful for checking
-	HEIGHT,     // for square/cube/rectangular textures.
-	DEPTH,
-	ARRAY,      // Probably not useful, but similar to depth
-	RES_WIDTH,  // Useful for detecting full screen buffers
-	RES_HEIGHT, // including arbitrary multiples of the resolution
-};
-
-class FuzzyMatch {
-	bool matches_common(UINT lhs, UINT effective) const;
-public:
-	FuzzyMatchOp op;
-	FuzzyMatchOperandType rhs_type1;
-	FuzzyMatchOperandType rhs_type2;
-
-	// TODO: Support more operand types, such as texture/resolution
-	// width/height. Maybe for advanced usage even allow an operand to be
-	// an ini param so it can be changed on the fly (might be useful for
-	// MEA to replace the mid-game profile switch, but I'd be surprised if
-	// there isn't a better way to achieve that).
-	UINT val;
-	UINT mask;
-	UINT numerator;
-	UINT denominator;
-
-	FuzzyMatch();
-	template <typename DescType>
-	bool matches(UINT lhs, const DescType *desc) const;
-	bool matches_uint(UINT lhs) const;
-};
+// FuzzyMatch, FilterField, FilterMatch and FilterExpr live in Filter.h.
 
 // Forward declaration to resolve circular dependency. One of these days we
 // really need to start splitting everything out of globals and making an
@@ -810,47 +773,20 @@ public:
 // FrameAnalysis.h to make that work, and that is an area that diverged from 1.2:
 struct TextureOverride;
 
+// A thin owner for a fuzzy [TextureOverride]. All match state lives in
+// TextureOverride::filter (a FilterMatch), so this type only exists to keep the
+// owning pointer used by G->mFuzzyTextureOverrides (and its sorted set) stable,
+// allowing the fuzzy and [Filter<Name>] matchers to share one implementation.
 class FuzzyMatchResourceDesc {
-private:
-	template <typename DescType>
-	bool check_common_resource_fields(const DescType *desc) const;
-	template <typename DescType>
-	bool check_common_texture_fields(const DescType *desc) const;
 public:
 	struct TextureOverride *texture_override;
 
-	bool matches_buffer;
-	bool matches_tex1d;
-	bool matches_tex2d;
-	bool matches_tex3d;
-
-	// TODO: Consider making this a vector we iterate over so we only
-	// process tests specified in this texture override
-	FuzzyMatch Usage;               // Common
-	FuzzyMatch BindFlags;           // Common
-	FuzzyMatch CPUAccessFlags;      // Common
-	FuzzyMatch MiscFlags;           // Common
-	FuzzyMatch ByteWidth;           // Buffer+StructuredBuffer
-	FuzzyMatch StructureByteStride; //        StructuredBuffer XXX: I think I may have seen this later set to 0 if it was initially set on a regular buffer?
-	FuzzyMatch MipLevels;           // 1D+2D+3D XXX: Need to check what happens for resources created with mips=0 and mips generated later
-	FuzzyMatch Format;              // 1D+2D+3D
-	FuzzyMatch Width;               // 1D+2D+3D
-	FuzzyMatch Height;              //    2D+3D
-	FuzzyMatch Depth;               //       3D
-	FuzzyMatch ArraySize;           // 1D+2D
-	FuzzyMatch SampleDesc_Count;    //    2D
-	FuzzyMatch SampleDesc_Quality;  //    2D    XXX Can anything change here if count=1?
-
 	FuzzyMatchResourceDesc(std::wstring section);
 	~FuzzyMatchResourceDesc();
-	bool matches(const D3D11_BUFFER_DESC *desc) const;
-	bool matches(const D3D11_TEXTURE1D_DESC *desc) const;
-	bool matches(const D3D11_TEXTURE2D_DESC *desc) const;
-	bool matches(const D3D11_TEXTURE3D_DESC *desc) const;
-
-	void set_resource_type(D3D11_RESOURCE_DIMENSION type);
-	bool update_types_matched();
 };
+
+// FilterMatch, FilterExpr and FilterMatches live in Filter.h.
+
 bool TextureOverrideLess(const struct TextureOverride &lhs, const struct TextureOverride &rhs);
 struct FuzzyMatchResourceDescLess {
 	bool operator() (const std::shared_ptr<FuzzyMatchResourceDesc> &lhs, const std::shared_ptr<FuzzyMatchResourceDesc> &rhs) const;

@@ -3212,6 +3212,9 @@ float CommandListOperand::process_texture_filter(CommandListState *state)
 			else
 				return -1.0f;
 
+		case ResourceCopyTargetEvaluationMode::RESOURCE_FILTER:
+			return texture_filter_target.EvaluateResourceFilter(state);
+
 		default:
 			return 0.0f;
 	}
@@ -3268,6 +3271,11 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 	}
 
 	//LogDebug("ShaderTarget Member Evaluation hash=%016I64x\n", shader_it->second);
+
+	// TODO(shader filters): handle ShaderTargetEvaluationMode::RESERVED_SHADER_FILTER
+	// here, before the cache lookup below (which currently asserts the shader is
+	// registered). Evaluation should reuse the FilterExpr matcher with the shader
+	// hash and/or its derived bytecode as the match context.
 
 	auto it = G->mShaderBindingsCache.find(shader_it->second);
 	if (it == G->mShaderBindingsCache.end()) {
@@ -5972,7 +5980,8 @@ bool CommandListOperand::parse_slot(const wstring* operand, const wstring* ini_n
 bool CommandListOperand::parse_target(const wstring* operand, const wstring* ini_namespace, CommandListScope* scope)
 {
 	int ret;
-	ret = texture_filter_target.ParseTarget(operand->c_str(), true, ini_namespace, scope);
+	// Expression operands are the only place a `->Match(<expression>)` member is valid:
+	ret = texture_filter_target.ParseTarget(operand->c_str(), true, ini_namespace, scope, true, false, true);
 	if (ret) {
 		type = ParamOverrideType::TEXTURE;
 		return operand_allowed_in_context(type, scope);
@@ -7887,6 +7896,9 @@ IniParserResult SyntaxTarget::extract_arguments(const wchar_t* target, size_t& l
 	if (length == 0 || target[length - 1] != L')')
 		return IniParserResult::TOKEN_NOT_FOUND;
 
+	// TODO: This scans for the last '(' only, so a member argument cannot
+	// contain grouping parentheses (e.g. `->Match((A | B) & C)`). Supporting
+	// them needs a balanced scan for the outermost '(' instead.
 	const wchar_t* open = wcsrchr(target, L'(');
 
 	if (!open || open <= target)
@@ -8081,6 +8093,9 @@ IniParserResult ShaderTarget::ParseTargetMember(
 {
 	//LogInfo("ShaderTarget::ParseTargetMember: target=%ls, length=%d\n", target, length);
 
+	// TODO(shader filters): add a `->match` member here (and remove the
+	// RESERVED_SHADER_FILTER placeholder) once shader filtering is implemented.
+
 	if (length < 11) // Smallest possible match is "vs->cb_mask".
 		return IniParserResult::TOKEN_NOT_FOUND;
 
@@ -8133,6 +8148,217 @@ IniParserResult ResourceCopyTarget::ParseTargetPrefix(const wchar_t*& target, si
 	return IniParserResult::TOKEN_NOT_FOUND;
 }
 
+namespace {
+
+// Accepts a bare texture hash literal: exactly 8 or 16 hex digits with no
+// prefix (commands are lowercased, so only lowercase digits occur). 8 digits
+// are the current 32-bit texture hash; 16 digits are reserved for the future
+// 64-bit shader hash.
+static bool parse_hash_literal(const std::wstring &token, uint64_t *hash)
+{
+	if (token.size() != 8 && token.size() != 16)
+		return false;
+
+	for (wchar_t c : token) {
+		if (!wcschr(L"0123456789abcdef", c))
+			return false;
+	}
+
+	*hash = wcstoull(token.c_str(), nullptr, 16);
+	return true;
+}
+
+// Parses a filter expression as accepted by the `->Match(<expression>)`
+// member, e.g. `Filter2k | !Filter4k`. Grammar, highest precedence first:
+//
+//   unary := '!' unary | name
+//   and   := unary ( '&' unary )*
+//   xor   := and   ( '^' and   )*
+//   or    := xor   ( '|' xor   )*
+//
+// Each operand is a [Filter<Name>] section name, resolved namespaced-first then
+// plain, or a raw texture hash literal (8 or 16 hex digits, no prefix). Returns
+// null and logs a warning on a syntax error or unknown name.
+class FilterExpressionParser
+{
+public:
+	FilterExpressionParser(const std::wstring &text, const std::wstring *ini_namespace)
+		: m_text(text), m_namespace(ini_namespace) {}
+
+	std::shared_ptr<const FilterExpr> parse()
+	{
+		skip_spaces();
+		if (at_end()) {
+			LogOverlayW(LOG_WARNING, L"Empty filter expression\n");
+			return nullptr;
+		}
+
+		std::shared_ptr<const FilterExpr> expr = parse_or();
+		if (!expr)
+			return nullptr;
+
+		skip_spaces();
+		if (!at_end()) {
+			LogOverlayW(LOG_WARNING, L"Unexpected token in filter expression: \"%ls\"\n",
+				m_text.c_str() + m_pos);
+			return nullptr;
+		}
+
+		return expr;
+	}
+
+private:
+	bool at_end() const { return m_pos >= m_text.size(); }
+
+	wchar_t peek() const { return at_end() ? L'\0' : m_text[m_pos]; }
+
+	void skip_spaces()
+	{
+		while (!at_end() && (m_text[m_pos] == L' ' || m_text[m_pos] == L'\t'))
+			m_pos++;
+	}
+
+	static bool is_operator(wchar_t c)
+	{
+		return c == L'!' || c == L'&' || c == L'^' || c == L'|';
+	}
+
+	static std::shared_ptr<const FilterExpr> make_node(FilterExprOp op,
+			std::shared_ptr<const FilterExpr> lhs, std::shared_ptr<const FilterExpr> rhs)
+	{
+		std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
+		node->op = op;
+		node->has_hash = (lhs && lhs->has_hash) || (rhs && rhs->has_hash);
+		node->children.push_back(std::move(lhs));
+		node->children.push_back(std::move(rhs));
+		return node;
+	}
+
+	std::shared_ptr<const FilterExpr> parse_or()
+	{
+		std::shared_ptr<const FilterExpr> lhs = parse_xor();
+		if (!lhs)
+			return nullptr;
+
+		while (true) {
+			skip_spaces();
+			if (peek() != L'|')
+				return lhs;
+			m_pos++;
+			std::shared_ptr<const FilterExpr> rhs = parse_xor();
+			if (!rhs)
+				return nullptr;
+			lhs = make_node(FilterExprOp::OR, std::move(lhs), std::move(rhs));
+		}
+	}
+
+	std::shared_ptr<const FilterExpr> parse_xor()
+	{
+		std::shared_ptr<const FilterExpr> lhs = parse_and();
+		if (!lhs)
+			return nullptr;
+
+		while (true) {
+			skip_spaces();
+			if (peek() != L'^')
+				return lhs;
+			m_pos++;
+			std::shared_ptr<const FilterExpr> rhs = parse_and();
+			if (!rhs)
+				return nullptr;
+			lhs = make_node(FilterExprOp::XOR, std::move(lhs), std::move(rhs));
+		}
+	}
+
+	std::shared_ptr<const FilterExpr> parse_and()
+	{
+		std::shared_ptr<const FilterExpr> lhs = parse_unary();
+		if (!lhs)
+			return nullptr;
+
+		while (true) {
+			skip_spaces();
+			if (peek() != L'&')
+				return lhs;
+			m_pos++;
+			std::shared_ptr<const FilterExpr> rhs = parse_unary();
+			if (!rhs)
+				return nullptr;
+			lhs = make_node(FilterExprOp::AND, std::move(lhs), std::move(rhs));
+		}
+	}
+
+	std::shared_ptr<const FilterExpr> parse_unary()
+	{
+		skip_spaces();
+		if (peek() == L'!') {
+			m_pos++;
+			std::shared_ptr<const FilterExpr> child = parse_unary();
+			if (!child)
+				return nullptr;
+			std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
+			node->op = FilterExprOp::NOT;
+			node->has_hash = child->has_hash;
+			node->children.push_back(std::move(child));
+			return node;
+		}
+		return parse_name();
+	}
+
+	std::shared_ptr<const FilterExpr> parse_name()
+	{
+		skip_spaces();
+
+		size_t start = m_pos;
+		while (!at_end() && !is_operator(m_text[m_pos])
+				&& m_text[m_pos] != L' ' && m_text[m_pos] != L'\t')
+			m_pos++;
+
+		if (m_pos == start) {
+			LogOverlayW(LOG_WARNING, L"Expected a filter name in filter expression: \"%ls\"\n",
+				m_text.c_str() + m_pos);
+			return nullptr;
+		}
+
+		return resolve(m_text.substr(start, m_pos - start));
+	}
+
+	std::shared_ptr<const FilterExpr> resolve(std::wstring filter_name)
+	{
+		std::wstring namespaced_section;
+
+		FilterMatches::iterator it = G->mFilters.end();
+		if (get_namespaced_section_name_lower(&filter_name, m_namespace, &namespaced_section))
+			it = G->mFilters.find(namespaced_section);
+		if (it == G->mFilters.end())
+			it = G->mFilters.find(filter_name);
+		if (it == G->mFilters.end()) {
+			uint64_t hash;
+			if (parse_hash_literal(filter_name, &hash)) {
+				std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
+				node->op = FilterExprOp::HASH;
+				node->hash = hash;
+				node->has_hash = true;
+				return node;
+			}
+
+			LogOverlayW(LOG_WARNING, L"Unknown filter \"%ls\"\n", filter_name.c_str());
+			return nullptr;
+		}
+
+		std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
+		node->op = FilterExprOp::LEAF;
+		node->leaf = it->second;
+		return node;
+	}
+
+	const std::wstring &m_text;
+	const std::wstring *m_namespace;
+	size_t m_pos = 0;
+};
+
+} // namespace
+
 IniParserResult ResourceCopyTarget::ParseTargetMember(
 	const wchar_t*& target, size_t& length, wstring& temp_target, const wstring* ini_namespace, CommandListScope* scope
 )
@@ -8148,6 +8374,9 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 	static constexpr MemberInfo members[] = {
 		{ L"->mips",           6, ResourceCopyTargetEvaluationMode::RESOURCE_MIPS },
 		{ L"->size",           6, ResourceCopyTargetEvaluationMode::RESOURCE_SIZE },
+		{ L"->match",          7, ResourceCopyTargetEvaluationMode::RESOURCE_FILTER, {{
+			MemberArg::Type::String   // Filter Expression or Hash
+		}} },
 		{ L"->array",          7, ResourceCopyTargetEvaluationMode::RESOURCE_ARRAY },
 		{ L"->index",          7, ResourceCopyTargetEvaluationMode::POOL_INDEX },
 		{ L"->width",          7, ResourceCopyTargetEvaluationMode::RESOURCE_WIDTH },
@@ -8182,7 +8411,21 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 		}} },
 	};
 
-	return SyntaxTarget::ParseTargetMember(members, target, length, temp_target, evaluation_mode, ini_namespace, scope);
+	IniParserResult ret = SyntaxTarget::ParseTargetMember(members, target, length, temp_target, evaluation_mode, ini_namespace, scope);
+
+	if (ret == IniParserResult::TOKEN_FOUND
+			&& evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_FILTER)
+	{
+		// Parse the filter expression (already lower cased along with the rest
+		// of the command list line) against the registered [Filter<Name>]
+		// sections, e.g. `Filter2k | !Filter4k`.
+		FilterExpressionParser parser(member_args[0].constant_string, ini_namespace);
+		filter = parser.parse();
+		if (!filter)
+			return IniParserResult::SYNTAX_ERROR;
+	}
+
+	return ret;
 }
 
 IniParserResult ResourceCopyTarget::ParseTargetCustomResource(const wchar_t*& target, size_t length, const wstring* ini_namespace, CommandListScope* scope)
@@ -8192,7 +8435,8 @@ IniParserResult ResourceCopyTarget::ParseTargetCustomResource(const wchar_t*& ta
 		return IniParserResult::TOKEN_NOT_FOUND;
 
 	// Exit early for non-resource type evaluation modes (essentially on invalid syntax)
-	if (!(evaluation_mode & ResourceCopyTargetEvaluationMode::RESOURCE_MASK))
+	if (!(evaluation_mode & ResourceCopyTargetEvaluationMode::RESOURCE_MASK)
+			&& evaluation_mode != ResourceCopyTargetEvaluationMode::RESOURCE_FILTER)
 		return IniParserResult::SYNTAX_ERROR;
 
 	// section name should already have been transformed to lower
@@ -8587,7 +8831,7 @@ bool ResourceCopyTarget::AcceptParsedTarget(IniParserResult ret, bool allow_rang
 	return ret == IniParserResult::TOKEN_FOUND && (allow_range || !IsRange());
 }
 
-bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom, bool allow_range)
+bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom, bool allow_range, bool allow_filter)
 {
 	IniParserResult ret;
 	size_t length = wcslen(target);
@@ -8619,6 +8863,11 @@ bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, cons
 		ret = ParseTargetMember(target, length, temp_target, ini_namespace, scope);
 		//LogInfo("ParseTarget: %d at ParseTargetMember\n", ret);
 		if (ret == IniParserResult::SYNTAX_ERROR)
+			return false;
+
+		// `->Match(<expression>)` is a value-only selector that is only meaningful
+		// as an expression operand, so it is rejected everywhere else:
+		if (evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_FILTER && !allow_filter)
 			return false;
 
 		// Parse the remainder as a custom resource (e.g. `ResourceFoo`).
@@ -11127,6 +11376,79 @@ float ResourceCopyTarget::GetPoolElementLastFrame(CommandListState* state)
 	CustomResourcePool* pool = custom_resource_pool->ResolvePool();
 
 	return (float)pool->GetLastUpdateFrame(id, false);
+}
+
+float ResourceCopyTarget::EvaluateResourceFilter(CommandListState* state)
+{
+	if (!filter)
+		return 0.0f;
+
+	if (type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
+		// Match the *declared* resource description without substantiating it:
+		CustomResource* custom_resource = GetCustomResource(state);
+		if (!custom_resource)
+			return -0.0f;
+
+		// TODO(shader filters): custom resources are not content-hashed yet, so
+		// pass no hash and let hash literals never match. Hashing them on the
+		// fly (or caching a hash on the CustomResource) would let
+		// `ResourceFoo->Match(<hash>)` work.
+		return filter->matches(nullptr, custom_resource, state->call_info) ? 1.0f : 0.0f;
+	}
+
+	ID3D11View* view = nullptr;
+	ID3D11Resource* resource = GetResource(
+		state, &view, nullptr, nullptr, nullptr, nullptr, nullptr);
+
+	if (!resource)
+		return -0.0f;
+
+	// Only compute the (locked) resource hash if the expression actually tests
+	// it. The hash is a 32-bit texture hash zero-extended into 64 bits.
+	uint64_t resource_hash = 0;
+	const uint64_t* resource_hash_ptr = nullptr;
+	if (filter->has_hash) {
+		resource_hash = GetResourceHashSafe(resource);
+		resource_hash_ptr = &resource_hash;
+	}
+
+	bool matched = false;
+
+	D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+	resource->GetType(&dimension);
+
+	switch (dimension) {
+		case D3D11_RESOURCE_DIMENSION_BUFFER: {
+			D3D11_BUFFER_DESC desc;
+			static_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			break;
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
+			D3D11_TEXTURE1D_DESC desc;
+			static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			break;
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
+			D3D11_TEXTURE2D_DESC desc;
+			static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			break;
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
+			D3D11_TEXTURE3D_DESC desc;
+			static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			break;
+		}
+	}
+
+	if (view)
+		view->Release();
+	resource->Release();
+
+	return matched ? 1.0f : 0.0f;
 }
 
 #pragma endregion ResourceCopyTarget

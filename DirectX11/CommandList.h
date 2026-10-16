@@ -849,6 +849,9 @@ enum class ResourceCopyTargetEvaluationMode : uint32_t {
 
 	POOL_MASK                = 0b00000000001111111000000000000000,
 
+	// FILTER
+	RESOURCE_FILTER        = 0b00000000100000000000000000000000,
+
 	// VARIABLE
 	VARIABLE                 = 0b00000000010000000000000000000000,
 
@@ -885,6 +888,8 @@ static EnumName_t<const wchar_t*, ResourceCopyTargetEvaluationMode> ResourceCopy
 	{L"SlotRange", ResourceCopyTargetEvaluationMode::SLOT_RANGE},
 
 	{L"Variable", ResourceCopyTargetEvaluationMode::VARIABLE},
+
+	{L"ResourceFilter", ResourceCopyTargetEvaluationMode::RESOURCE_FILTER},
 
 	{L"LayoutElementFormat", ResourceCopyTargetEvaluationMode::LAYOUT_ELEMENT_FORMAT},
 	{L"LayoutElementOffset", ResourceCopyTargetEvaluationMode::LAYOUT_ELEMENT_OFFSET},
@@ -982,6 +987,15 @@ enum class ShaderTargetEvaluationMode : uint32_t {
 	DCL_SRV_TYPE       = 0b00000000000000000000000000100000,
 	DCL_SRV_DIMENSION  = 0b00000000000000000000000001000000,
 	DCL_SRV_STRIDE     = 0b00000000000000000000000010000000,
+
+	// Reserved for a future shader filter (a `[Filter<Name>]` evaluated against
+	// the currently bound shader instead of a resource).
+	//
+	// TODO(shader filters): implement in CommandListOperand::process_shader_filter
+	// *before* the G->mShaderBindingsCache lookup, reusing the FilterExpr
+	// matcher with the shader hash and/or its derived bytecode as the context.
+	// See the "Planned: shader matching" note in docs/.../filters.md.
+	RESERVED_SHADER_FILTER = 0b00000000000000000000000100000000,
 };
 SENSIBLE_ENUM(ShaderTargetEvaluationMode);
 //static EnumName_t<const wchar_t*, ShaderTargetEvaluationMode> ShaderTargetEvaluationModeNames[] = {
@@ -991,6 +1005,10 @@ SENSIBLE_ENUM(ShaderTargetEvaluationMode);
 //};
 
 
+// TODO(shader filters): a `->Match(...)` member on a shader target (e.g.
+// `ps->Match(...)`) will reuse the FilterExpr matcher, using the shader hash
+// and/or its derived bytecode as the match context instead of a resource
+// descriptor. See RESERVED_SHADER_FILTER above.
 class ShaderTarget : public SyntaxTarget
 {
 public:
@@ -1031,11 +1049,16 @@ public:
 	std::unique_ptr<CommandListExpression> range_start = nullptr;
 	std::unique_ptr<CommandListExpression> range_end = nullptr;
 
+	// Set when the target carries a `->Match(<expression>)` member
+	// (RESOURCE_FILTER). The tree composes [Filter<Name>] sections with the
+	// boolean operators `!`, `&`, `^` and `|`.
+	std::shared_ptr<const FilterExpr> filter;
+
 	bool forbid_view_cache = false;
 
 	// allow_range: accept ps-t[$a:$b] / PoolFoo[$a:$b] / bare ps-t targets,
 	// only meaningful for commands that iterate the range.
-	bool ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom = true, bool allow_range = false);
+	bool ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom = true, bool allow_range = false, bool allow_filter = false);
 	bool IsRange() const;
 
 	// Slot for this draw, or UINT_MAX (with a warning) if a dynamic slot
@@ -1099,6 +1122,12 @@ public:
 	float GetResourceMips(CommandListState* state);
 	D3D11_BIND_FLAG GetResourceBindFlags(CommandListState *state);
 	float GetPoolElementLastFrame(CommandListState* state);
+
+	// Evaluates the `->Match(<expression>)` member against the target resource.
+	// Returns 1.0 (match), 0.0 (resource bound but filter did not match) or
+	// -0.0 (resource could not be resolved), matching the bare texture filter
+	// expression convention for unbound resources.
+	float EvaluateResourceFilter(CommandListState* state);
 
 	D3D11_BIND_FLAG BindFlags(CommandListState *state, D3D11_RESOURCE_MISC_FLAG *misc_flags=NULL);
 

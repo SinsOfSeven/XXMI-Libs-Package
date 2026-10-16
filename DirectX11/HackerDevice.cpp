@@ -2557,6 +2557,10 @@ fnv:
 	return hash;
 }
 
+// TODO(shader filters): this bytecode reflection cache is the intended source
+// of shader-filter match data (DCL_* declarations, and later anything the
+// shader filter needs). Extend the parsed ShaderBindings and/or expose a lookup
+// that shader filtering can consume.
 static void CacheShaderBindings(uint64_t hash, const void* pShaderBytecode, SIZE_T BytecodeLength)
 {
 	{

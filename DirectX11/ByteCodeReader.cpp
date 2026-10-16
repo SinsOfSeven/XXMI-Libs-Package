@@ -28,6 +28,8 @@ static uint32_t read_u32(const uint8_t* ptr)
 	return value;
 }
 
+// TODO(shader filters): extend the reflection here with whatever shader
+// filtering needs (beyond the DCL_* declarations currently parsed).
 bool get_shader_bindings_from_bytecode(const void* data, size_t size, ShaderBindings* out)
 {
 	if (!data || !out || size < 32)

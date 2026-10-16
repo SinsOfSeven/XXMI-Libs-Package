@@ -184,6 +184,29 @@ The same data caching rules as for [`HashRegion`](#hashregionbyte_offset-byte_si
 
 > **Experimental:** `->SpatialHash(...)` is experimental and its behavior may change. **Only CB regions** are really tested.
 
+### `Match`
+
+Evaluates a `[Filter<Name>]` section against the resource and returns `1.0` if it matches, `0.0` if it does not, or `-0.0` if the resource is unbound. The operand is a filter name (the full `[Filter<Name>]` section name, matching is case-insensitive), a raw resource hash (8 or 16 hex digits, no `0x` prefix), or a boolean expression combining several of them with `!` (NOT), `&` (AND), `^` (XOR) and `|` (OR).
+
+```ini
+$is_2k = ps-t0->Match(Filter2k)
+$is_large = ps-t0->Match(Filter2k | Filter4k)
+$is_known = ps-t0->Match(1234abcd)
+if ResourceFoo->Match(Filter2k & !Filter4k)
+    ; Do something
+endif
+```
+
+Because it is an ordinary expression operand it can be composed with arithmetic, for example to build a score:
+
+```ini
+$score = ps-t1->Match(FilterRatio) + ps-t2->Match(FilterIndex)
+```
+
+`->Match(...)` resolves the underlying resource (or the *declared* description of a custom resource) and applies the filter's resource and draw call constraints without any GPU readback. See [Filters](filters.md) for the `[Filter<Name>]` section syntax and supported `match_*` fields.
+
+> `->Match(...)` is only valid as an expression operand and cannot be used as a command argument target or an assignment destination.
+
 ### Performance
 
 Accessing `->` attributes from custom resources is extremely inexpensive, as the metadata is stored directly with the custom resource.

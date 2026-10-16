@@ -296,15 +296,12 @@ struct TextureOverride {
 	float filter_index;
 	float backup_filter_index;
 
-	bool has_draw_context_match;
 	bool has_match_priority;
 	int priority;
-	FuzzyMatch match_first_vertex;
-	FuzzyMatch match_first_index;
-	FuzzyMatch match_first_instance;
-	FuzzyMatch match_vertex_count;
-	FuzzyMatch match_index_count;
-	FuzzyMatch match_instance_count;
+
+	// The match_* conditions, both resource description and draw context
+	// fields. This is the same matcher [Filter<Name>] sections use.
+	FilterMatch filter;
 
 	CommandList command_list;
 	CommandList post_command_list;
@@ -320,7 +317,6 @@ struct TextureOverride {
 		expand_region_copy(false),
 		deny_cpu_read(false),
 		filter_index(FLT_MAX),
-		has_draw_context_match(false),
 		has_match_priority(false),
 		priority(0)
 	{}
@@ -606,9 +602,15 @@ struct Globals
 	TextureOverrideMap mTextureOverrideMap;
 	FuzzyTextureOverrides mFuzzyTextureOverrides;
 
+	// [Filter<Name>] sections, keyed by lowercased full section id (mirrors
+	// customResources):
+	FilterMatches mFilters;
+
 	std::unordered_map<UINT64, ShaderModelCacheEntry> mShaderModelCache;
 
 	CRITICAL_SECTION mShaderBindingsLock;
+	// TODO(shader filters): this cache is the source of shader-filter match data.
+	// See CacheShaderBindings (HackerDevice.cpp).
 	std::unordered_map<UINT64, ShaderBindings> mShaderBindingsCache;
 
 	unordered_map<uint32_t, TextureOverrideFuzzyMatches> mTextureOverrideDrawIndexMap;  // Contains hash+TextureOverrides pairs indexed by match_index_count
