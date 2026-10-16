@@ -10713,6 +10713,18 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 // the -0.0 / 0.0 / 1.0 fallbacks can be distinguished.
 float ResourceCopyTarget::FindTextureFilterIndex(CommandListState *state, bool *resource_found, bool *match_found)
 {
+	// LOD matching uses a separate candidate map; preserve the normal match order.
+	if (G->mTextureOverrideLodMap) {
+		TextureOverrideMatches matches;
+		FindTextureOverrides(state, resource_found, &matches);
+		if (match_found)
+			*match_found = !matches.empty();
+		for (auto i = matches.rbegin(); i != matches.rend(); ++i)
+			if ((*i)->filter_index != FLT_MAX)
+				return (*i)->filter_index;
+		return FLT_MAX;
+	}
+
 	ID3D11View *view = NULL;
 	UINT stride = 0, offset = 0;
 	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;

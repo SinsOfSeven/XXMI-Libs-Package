@@ -2366,7 +2366,7 @@ static const TextureOverride *find_texture_override_filter_index_for_hash(uint32
 	// The override list for a hash is sorted by priority, so reverse iteration
 	// finds the highest priority entry that set a filter_index first.
 	for (j = i->second.rbegin(); j != i->second.rend(); j++) {
-		if (matches_draw_info(&(*j), call_info)) {
+		if (j->filter.matches_draw_conditions(call_info)) {
 			if (any_match)
 				*any_match = true;
 			if (j->filter_index != FLT_MAX)
@@ -2390,7 +2390,7 @@ const TextureOverride *find_texture_override_filter_index_for_resource_fuzzy(ID3
 		// creation-time constraints. Only draw conditions remain to be checked.
 		for (auto i = candidates->fuzzy_matches.rbegin(); i != candidates->fuzzy_matches.rend(); ++i) {
 			TextureOverride *to = *i;
-			if (!matches_draw_info(to, call_info))
+			if (!to->filter.matches_draw_conditions(call_info))
 				continue;
 			if (any_match)
 				*any_match = true;
@@ -2412,7 +2412,7 @@ const TextureOverride *find_texture_override_filter_index_for_resource_by_hash(I
 	if (G->mTextureOverrideMap.empty())
 		return NULL;
 
-	uint32_t hash = get_hash_for_resource(resource);
+	uint32_t hash = GetResourceHashSafe(resource);
 	if (!hash)
 		return NULL;
 
@@ -2428,7 +2428,7 @@ const TextureOverride *find_texture_override_filter_index_from_fuzzy_matches(ID3
 	// Same as FindTextureOverrides - if we couldn't compute a region hash, fall
 	// back to matching candidates by the full resource hash.
 	if (!hash)
-		hash = get_hash_for_resource(resource);
+		hash = GetResourceHashSafe(resource);
 	if (!hash)
 		return NULL;
 
@@ -2436,7 +2436,7 @@ const TextureOverride *find_texture_override_filter_index_from_fuzzy_matches(ID3
 	// remember the latest match that set a filter_index to reproduce the
 	// "last entry in the list wins" rule.
 	for (it = fuzzy_matches->begin(); it != fuzzy_matches->end(); ++it) {
-		if (it->hash == hash && matches_draw_info(it->texture_override, call_info)) {
+		if (it->hash == hash && it->texture_override->filter.matches_draw_conditions(call_info)) {
 			if (any_match)
 				*any_match = true;
 			if (it->texture_override->filter_index != FLT_MAX)
