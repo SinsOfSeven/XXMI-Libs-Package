@@ -107,4 +107,3 @@ bool shader_bytecode_dxbc_instructions(const void *data, size_t size)
 	}
 	return found_code;
 }
-
