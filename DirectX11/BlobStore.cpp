@@ -48,6 +48,7 @@ void BlobStore::close()
 		f = INVALID_HANDLE_VALUE;
 	}
 	window.clear();
+	exclusive_lock = false;
 	window_valid = false;
 	blob_logical_end = 0;
 }
@@ -152,6 +153,21 @@ bool BlobStore::append(const uint8_t *data, size_t size, uint64_t *out_offset)
 	return true;
 }
 
+bool BlobStore::flush()
+{
+	return f == INVALID_HANDLE_VALUE || !!FlushFileBuffers(f);
+}
+
+bool BlobStore::lock_exclusive(bool create)
+{
+	if (exclusive_lock) return true;
+	if (!ensure_open(create)) return false;
+	OVERLAPPED overlap{};
+	exclusive_lock = !!LockFileEx(f, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+		0, MAXDWORD, MAXDWORD, &overlap);
+	return exclusive_lock;
+}
+
 bool BlobStore::read(uint64_t offset, uint32_t size, uint8_t *dst)
 {
 	if (!size)
@@ -231,6 +247,12 @@ bool blob_store_metadata_write(const wchar_t *path, const void *data, size_t siz
 {
 	if (size > BLOB_STORE_METADATA_MAX)
 		return false;
+	return blob_store_atomic_write(path, data, size);
+}
+
+bool blob_store_atomic_write(const wchar_t *path, const void *data, size_t size)
+{
+	if (size > MAXDWORD) return false;
 	std::wstring tmp(path);
 	tmp += L".tmp";
 

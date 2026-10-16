@@ -24,6 +24,7 @@
 #include "ShaderRegex.h"
 #include "ShaderBytecodeValidation.h"
 #include "ShaderBytecodeRecord.h"
+#include "ResourcePersist.h"
 #include "FrameAnalysis.h"
 #include "profiling.h"
 
@@ -1179,6 +1180,7 @@ out_profile:
 
 void HackerContext::AfterDraw(DrawContext &data)
 {
+	if (!data.call_info.skip) ResourcePersistOutputs(mOrigContext1, false);
 	int i;
 	Profiling::State profiling_state;
 
@@ -1680,6 +1682,8 @@ STDMETHODIMP HackerContext::Map(THIS_
 	hr = mOrigContext1->Map(pResource, Subresource, MapType, MapFlags, pMappedResource);
 
 	TrackAndDivertMap(hr, pResource, Subresource, MapType, MapFlags, pMappedResource);
+	if (SUCCEEDED(hr)) ResourcePersistMapped(pResource, true);
+	if (SUCCEEDED(hr) && MapType != D3D11_MAP_READ) ResourcePersistWrite(mOrigContext1, pResource);
 
 	return hr;
 }
@@ -1692,6 +1696,7 @@ STDMETHODIMP_(void) HackerContext::Unmap(THIS_
 {
 	TrackAndDivertUnmap(pResource, Subresource);
 	mOrigContext1->Unmap(pResource, Subresource);
+	ResourcePersistMapped(pResource, false);
 }
 
 STDMETHODIMP_(void) HackerContext::PSSetConstantBuffers(THIS_
@@ -1963,6 +1968,7 @@ bool HackerContext::BeforeDispatch(DispatchContext *context)
 
 void HackerContext::AfterDispatch(DispatchContext *context)
 {
+	if (!context->call_info.skip) ResourcePersistOutputs(mOrigContext1, true);
 	if (context->post_commands)
 		RunCommandList(mHackerDevice, this, context->post_commands, &context->call_info, true);
 }
@@ -2196,6 +2202,8 @@ STDMETHODIMP_(void) HackerContext::CopySubresourceRegion(THIS_
 	if (ExpandRegionCopy(pDstResource, DstX, DstY, pSrcResource, pSrcBox, &replaceDstX, &replaceSrcBox))
 		pSrcBox = &replaceSrcBox;
 
+	 ResourcePersistWrite(mOrigContext1, pDstResource);
+
 	 mOrigContext1->CopySubresourceRegion(pDstResource, DstSubresource, replaceDstX, DstY, DstZ,
 		pSrcResource, SrcSubresource, pSrcBox);
 
@@ -2264,6 +2272,7 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 		// Extended buffers are also larger than the source resource, so they
 		// need the CopySubresourceRegion path as well.
 		if (override_byte_width != -1 || override_extend_byte_width > 0) {
+			ResourcePersistWrite(mOrigContext1, pDstResource);
 			mOrigContext1->CopySubresourceRegion(
 				pDstResource,           // pDstResource
 				0,                      // DstSubresource (0 for buffers)
@@ -2284,6 +2293,8 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 		}
 	}
 	
+	ResourcePersistWrite(mOrigContext1, pDstResource);
+
 	mOrigContext1->CopyResource(pDstResource, pSrcResource);
 
 	// Same as CopySubresourceRegion: the destination's contents may have changed,
@@ -2340,6 +2351,8 @@ STDMETHODIMP_(void) HackerContext::UpdateSubresource(THIS_
 	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		ClearResourceRegionHashCache(pDstResource);
 
+	 ResourcePersistWrite(mOrigContext1, pDstResource);
+
 	 mOrigContext1->UpdateSubresource(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch,
 		SrcDepthPitch);
 
@@ -2366,6 +2379,7 @@ STDMETHODIMP_(void) HackerContext::CopyStructureCount(THIS_
 	/* [annotation] */
 	__in  ID3D11UnorderedAccessView *pSrcView)
 {
+	 ResourcePersistWrite(mOrigContext1, pDstBuffer);
 	 mOrigContext1->CopyStructureCount(pDstBuffer, DstAlignedByteOffset, pSrcView);
 }
 
@@ -2376,6 +2390,7 @@ STDMETHODIMP_(void) HackerContext::ClearUnorderedAccessViewUint(THIS_
 	__in  const UINT Values[4])
 {
 	RunViewCommandList(mHackerDevice, this, &G->clear_uav_uint_command_list, pUnorderedAccessView, false);
+	ResourcePersistWriteView(mOrigContext1, pUnorderedAccessView);
 	mOrigContext1->ClearUnorderedAccessViewUint(pUnorderedAccessView, Values);
 	RunViewCommandList(mHackerDevice, this, &G->post_clear_uav_uint_command_list, pUnorderedAccessView, true);
 }
@@ -2387,6 +2402,7 @@ STDMETHODIMP_(void) HackerContext::ClearUnorderedAccessViewFloat(THIS_
 	__in  const FLOAT Values[4])
 {
 	RunViewCommandList(mHackerDevice, this, &G->clear_uav_float_command_list, pUnorderedAccessView, false);
+	ResourcePersistWriteView(mOrigContext1, pUnorderedAccessView);
 	mOrigContext1->ClearUnorderedAccessViewFloat(pUnorderedAccessView, Values);
 	RunViewCommandList(mHackerDevice, this, &G->post_clear_uav_float_command_list, pUnorderedAccessView, true);
 }
@@ -2402,6 +2418,7 @@ STDMETHODIMP_(void) HackerContext::ClearDepthStencilView(THIS_
 	__in  UINT8 Stencil)
 {
 	RunViewCommandList(mHackerDevice, this, &G->clear_dsv_command_list, pDepthStencilView, false);
+	ResourcePersistWriteView(mOrigContext1, pDepthStencilView);
 	mOrigContext1->ClearDepthStencilView(pDepthStencilView, ClearFlags, Depth, Stencil);
 	RunViewCommandList(mHackerDevice, this, &G->post_clear_dsv_command_list, pDepthStencilView, true);
 }
@@ -2410,6 +2427,7 @@ STDMETHODIMP_(void) HackerContext::GenerateMips(THIS_
 	/* [annotation] */
 	__in  ID3D11ShaderResourceView *pShaderResourceView)
 {
+	 ResourcePersistWriteView(mOrigContext1, pShaderResourceView);
 	 mOrigContext1->GenerateMips(pShaderResourceView);
 
 	// GenerateMips regenerates the mips on the GPU, which the CPU never sees, so
@@ -2457,6 +2475,7 @@ STDMETHODIMP_(void) HackerContext::ResolveSubresource(THIS_
 	/* [annotation] */
 	__in  DXGI_FORMAT Format)
 {
+	 ResourcePersistWrite(mOrigContext1, pDstResource);
 	 mOrigContext1->ResolveSubresource(pDstResource, DstSubresource, pSrcResource, SrcSubresource,
 		Format);
 
@@ -2482,6 +2501,7 @@ STDMETHODIMP_(void) HackerContext::ExecuteCommandList(THIS_
 			G->mip_hash_deferred_generation++;
 			LeaveCriticalSection(&G->mCriticalSection);
 		}
+		ResourcePersistExecute(mOrigContext1, pCommandList);
 	}
 
 	if (!RestoreContextState) {
@@ -3193,7 +3213,8 @@ STDMETHODIMP HackerContext::FinishCommandList(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11CommandList **ppCommandList)
 {
-	BOOL ret = mOrigContext1->FinishCommandList(RestoreDeferredContextState, ppCommandList);
+	HRESULT ret = mOrigContext1->FinishCommandList(RestoreDeferredContextState, ppCommandList);
+	if (SUCCEEDED(ret) && ppCommandList && *ppCommandList) ResourcePersistFinish(mOrigContext1, *ppCommandList);
 
 	if (!RestoreDeferredContextState) {
 		// This is equivalent to calling ClearState() afterwards, so we
@@ -3669,6 +3690,7 @@ STDMETHODIMP_(void) HackerContext::ClearRenderTargetView(THIS_
 	__in  const FLOAT ColorRGBA[4])
 {
 	RunViewCommandList(mHackerDevice, this, &G->clear_rtv_command_list, pRenderTargetView, false);
+	ResourcePersistWriteView(mOrigContext1, pRenderTargetView);
 	mOrigContext1->ClearRenderTargetView(pRenderTargetView, ColorRGBA);
 	RunViewCommandList(mHackerDevice, this, &G->post_clear_rtv_command_list, pRenderTargetView, true);
 }
@@ -3705,6 +3727,8 @@ void STDMETHODCALLTYPE HackerContext::CopySubresourceRegion1(
 	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		ClearResourceRegionHashCache(pDstResource);
 
+	ResourcePersistWrite(mOrigContext1, pDstResource);
+
 	mOrigContext1->CopySubresourceRegion1(pDstResource, DstSubresource, DstX, DstY, DstZ, pSrcResource, SrcSubresource, pSrcBox, CopyFlags);
 
 	// Same as CopySubresourceRegion: the destination's contents may have changed,
@@ -3738,6 +3762,8 @@ void STDMETHODCALLTYPE HackerContext::UpdateSubresource1(
 	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		ClearResourceRegionHashCache(pDstResource);
 
+	ResourcePersistWrite(mOrigContext1, pDstResource);
+
 	mOrigContext1->UpdateSubresource1(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch, CopyFlags);
 
 	// Same as UpdateSubresource: flag the tracked hashes stale rather than
@@ -3758,6 +3784,8 @@ void STDMETHODCALLTYPE HackerContext::DiscardResource(
 	if (G->cache_resource_data != DataCacheBindFlags::INVALID)
 		ClearResourceRegionHashCache(pResource);
 
+	ResourcePersistWrite(mOrigContext1, pResource);
+
 	mOrigContext1->DiscardResource(pResource);
 	if (G->hunting || G->track_mip_hashes || ResourceTracksMips(pResource))
 		MarkTexture2DHashesDirty(pResource, ~0u, mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
@@ -3767,6 +3795,7 @@ void STDMETHODCALLTYPE HackerContext::DiscardView(
 	/* [annotation] */
 	_In_  ID3D11View *pResourceView)
 {
+	ResourcePersistWriteView(mOrigContext1, pResourceView);
 	mOrigContext1->DiscardView(pResourceView);
 	if (pResourceView) {
 		ID3D11Resource *resource = nullptr;
@@ -4005,6 +4034,7 @@ void STDMETHODCALLTYPE HackerContext::ClearView(
 	// the existing RTV / DSV / UAV clear command lists instead for
 	// compatibility with engines that might use this if the feature level
 	// is high enough, and the others if it is not.
+	ResourcePersistWriteView(mOrigContext1, pView);
 	mOrigContext1->ClearView(pView, Color, pRect, NumRects);
 }
 
@@ -4016,6 +4046,7 @@ void STDMETHODCALLTYPE HackerContext::DiscardView1(
 	_In_reads_opt_(NumRects)  const D3D11_RECT *pRects,
 	UINT NumRects)
 {
+	ResourcePersistWriteView(mOrigContext1, pResourceView);
 	mOrigContext1->DiscardView1(pResourceView, pRects, NumRects);
 	if ((G->hunting || G->track_mip_hashes) && pResourceView) {
 		ID3D11Resource *resource = nullptr;

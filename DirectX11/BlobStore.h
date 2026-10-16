@@ -32,6 +32,10 @@ public:
 
 	bool is_open() const;
 	void close();
+	// Make appended payloads durable before publishing their metadata.
+	bool flush();
+	// Optional writer lease, held on the same handle as I/O until close().
+	bool lock_exclusive(bool create);
 
 	// True if the file on disk is at least expected_size bytes long. Used to
 	// validate a cache before trusting it - the metadata may only reference
@@ -88,6 +92,7 @@ private:
 	static constexpr DWORD exact_read_chunk_size() { return 4 * 1024 * 1024; }
 
 	HANDLE f = INVALID_HANDLE_VALUE;
+	bool exclusive_lock = false;
 	std::wstring path;
 
 	uint64_t blob_logical_end = 0;
@@ -100,6 +105,8 @@ private:
 // renamed over the real file with write-through, so a crash at any point can
 // never leave a half-written cache behind:
 bool blob_store_metadata_write(const wchar_t *path, const void *data, size_t size);
+// Atomic publication for payload exports without the metadata size cap.
+bool blob_store_atomic_write(const wchar_t *path, const void *data, size_t size);
 
 // Reads the entire metadata file into out. The caller owns the format and is
 // responsible for validating the size and contents:

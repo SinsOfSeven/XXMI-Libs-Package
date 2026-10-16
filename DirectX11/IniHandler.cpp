@@ -16,6 +16,7 @@
 #include "Hunting.h"
 #include "ShaderRegex.h"
 #include "BlobStore.h"
+#include "ResourcePersist.h"
 #include "ShaderBytecodeRecord.h"
 #include "cursor.h"
 #include <chrono>
@@ -222,6 +223,8 @@ struct IniSection {
 	// sections where the namespacing can be per-line:
 	wstring ini_namespace;
 	wstring ini_path;
+	wstring source_ini;
+	bool explicit_namespace = false;
 };
 
 // std::map is used so this is sorted for iterating over a prefix:
@@ -378,7 +381,7 @@ static bool get_namespaced_section_path(const wchar_t *section, wstring *ret)
 static void ParseIniSectionLine(wstring *wline, wstring *section,
 		int *warn_duplicates, bool *warn_lines_without_equals,
 		IniSection **section_entry, const wstring *ini_namespace,
-		const wstring *ini_path)
+		const wstring *ini_path, const wstring &source_ini, bool explicit_namespace)
 {
 	bool allow_duplicate_sections = false;
 	size_t first, last;
@@ -438,6 +441,8 @@ static void ParseIniSectionLine(wstring *wline, wstring *section,
 
 	IniSection* entry = &result.first->second;
 	*section_entry = entry;
+	entry->source_ini = source_ini;
+	entry->explicit_namespace = explicit_namespace;
 
 	// Record the namespace so we can use it later when looking up any
 	// referenced sections. Only for namespaced sections, not global
@@ -575,7 +580,7 @@ static void ParseIniKeyValLine(wstring *wline, wstring *section,
 	section_entry->kv_vec.emplace_back(key, val, *wline, *ini_namespace);
 }
 
-static void ParseIniStream(wistream *stream, const wstring *_ini_namespace)
+static void ParseIniStream(wistream *stream, const wstring *_ini_namespace, const wstring &source_ini = L"")
 {
 	string aline;
 	wstring wline, section, ini_path;
@@ -589,6 +594,7 @@ static void ParseIniStream(wistream *stream, const wstring *_ini_namespace)
 	bool warn_lines_without_equals = true;
 	wstring ini_namespace;
 	bool preamble = true;
+	bool explicit_namespace = false;
 
 	// Simplify code further on by translating NULL to "" here:
 	if (_ini_namespace)
@@ -626,11 +632,16 @@ static void ParseIniStream(wistream *stream, const wstring *_ini_namespace)
 			ParseIniSectionLine(&wline, &section, &warn_duplicates,
 					    &warn_lines_without_equals,
 					    &section_entry, &ini_namespace,
-					    &ini_path);
+					    &ini_path, source_ini, explicit_namespace);
 			continue;
 		}
 
 		if (preamble) {
+			size_t equals = wline.find(L'=');
+			if (equals != wstring::npos) {
+				wstring key = wline.substr(0, wline.find_last_not_of(L" \t", equals - 1) + 1);
+				if (!_wcsicmp(key.c_str(), L"namespace")) explicit_namespace = true;
+			}
 			if (!ParseIniPreamble(&wline, &ini_namespace))
 				return;
 			continue;
@@ -675,7 +686,7 @@ static void ParseNamespacedIniFile(const wchar_t *ini, const wstring *ini_namesp
 		return;
 	}
 	f.imbue(std::locale(f.getloc(), new std::codecvt_utf8<wchar_t, 0x10ffff, std::consume_header>));
-	ParseIniStream(&f, ini_namespace);
+	ParseIniStream(&f, ini_namespace, ini);
 }
 
 static void ParseIniFile(const wchar_t *ini)
@@ -2045,6 +2056,49 @@ static void ParseResourceInitialData(CustomResource *custom_resource, const wcha
 	}
 }
 
+static void ConfigureResourcePersist(CustomResource *resource, const wchar_t *section_name)
+{
+	bool persist = GetIniBool(section_name, L"persist", false, NULL);
+	bool debug = GetIniBool(section_name, L"debug_dump", false, NULL);
+	if (!persist) return;
+	auto &section = ini_sections.at(section_name);
+	wchar_t module[MAX_PATH];
+	GetModuleFileNameW(migoto_handle, module, MAX_PATH);
+	wstring root(module);
+	root.resize(root.find_last_of(L"\\/") + 1);
+	wstring owner, path;
+	if (section.explicit_namespace) {
+		owner = section.ini_namespace;
+		std::transform(owner.begin(), owner.end(), owner.begin(), ::towlower);
+		wstring component;
+		for (wchar_t c : owner) {
+			if (iswalnum(c) || c == L'_' || c == L'-') component += c;
+			else { wchar_t escaped[8]; swprintf_s(escaped, L"~%04x", unsigned(c)); component += escaped; }
+		}
+		if (component.empty() || component.size() > 160) {
+			IniWarningW(L"ResourcePersist: namespace cannot form a cache filename\n - [%ls]\n", section_name); return;
+		}
+		CreateDirectoryW((root + L"ShaderCache").c_str(), NULL);
+		path = root + L"ShaderCache\\ResourcePersist_" + component;
+		owner = L"namespace:" + owner;
+	} else {
+		wstring source = section.source_ini.empty() ? root + L"d3dx.ini" : section.source_ini;
+		wchar_t absolute[32768];
+		DWORD length = GetFullPathNameW(source.c_str(), _countof(absolute), absolute, NULL);
+		if (!length || length >= _countof(absolute)) return;
+		source = absolute;
+		owner = source;
+		std::transform(owner.begin(), owner.end(), owner.begin(), ::towlower);
+		size_t slash = source.find_last_of(L"\\/");
+		wstring stem = source.substr(slash + 1);
+		size_t dot = stem.find_last_of(L'.');
+		if (dot != wstring::npos) stem.resize(dot);
+		path = source.substr(0, slash + 1) + L"ResourcePersist_" + stem;
+		owner = L"ini:" + owner;
+	}
+	ResourcePersistConfigure(resource, owner, path, true, debug);
+}
+
 static CustomResource* ParseResourceSection(const wchar_t* section_name, const wchar_t* resource_id_suffix)
 {
 	wchar_t setting[MAX_PATH];
@@ -2128,6 +2182,7 @@ static CustomResource* ParseResourceSection(const wchar_t* section_name, const w
 	}
 
 	ParseResourceInitialData(custom_resource, section_name);
+	ConfigureResourcePersist(custom_resource, section_name);
 
 	return custom_resource;
 }
@@ -2183,12 +2238,16 @@ static CustomResourcePool* ParseResourcePoolSection(const wchar_t* section_name)
 	);
 
 	pool->Initialize(pool_size);
+	ResourcePersistRestorePool(pool);
 
 	return pool;
 }
 
 static void ParseResourceSections()
 {
+	// Cover direct configuration loads as well as the normal ReloadConfig path.
+	ResourcePersistCheckpoint();
+	ResourcePersistReset();
 	// Edges point at entries of the maps cleared below:
 	ClearDeferredBindFlags();
 	customResourcePools.clear();
@@ -5551,6 +5610,7 @@ void ReloadConfig(HackerDevice *device)
 		ResetUnknownSettingsCache();
 
 		// Parse d3dx.ini and all includes.
+		ResourcePersistCheckpoint();
 		LoadConfigFile();
 
 		G->current_unknown_settings_hash = HashUnknownSettings();

@@ -621,6 +621,15 @@ public:
 	wstring filename;
 	bool substantiated;
 
+	bool persist = false;
+	bool debug_dump = false;
+	bool persist_checked = false;
+	bool persist_null = false;
+	uint64_t persist_dirty_generation = 0;
+	uint64_t persist_declaration = 0;
+	wstring persist_owner;
+	wstring persist_path;
+
 	// Used to override description when copying or synthesise resources
 	// from scratch:
 	CustomResourceType override_type;
@@ -728,6 +737,7 @@ struct PoolSlot
 
 class CustomResourcePool
 {
+    friend struct ResourcePersistence;
 public:
 	wstring name;
 

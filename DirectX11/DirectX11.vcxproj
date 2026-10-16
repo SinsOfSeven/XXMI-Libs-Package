@@ -72,6 +72,7 @@
     <ClCompile Include="ShaderRegex.cpp" />
     <ClCompile Include="BlobStore.cpp" />
     <ClCompile Include="ShaderBytecodeValidation.cpp" />
+    <ClCompile Include="ResourcePersist.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="d3d11Wrapper.def" />
@@ -112,6 +113,7 @@
     <ClInclude Include="ShaderStage.h" />
     <ClInclude Include="BlobStore.h" />
     <ClInclude Include="ShaderBytecodeValidation.h" />
+    <ClInclude Include="ResourcePersist.h" />
     <ClInclude Include="..\vkeys.h" />
   </ItemGroup>
   <ItemGroup>
