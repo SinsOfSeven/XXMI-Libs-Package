@@ -10,11 +10,37 @@
 #include <atomic>
 #include <cstring>
 #include <iterator>
+#include <map>
 #include <mutex>
 
 ShaderRegexGroups shader_regex_groups;
 std::vector<ShaderRegexGroup*> shader_regex_group_index;
 uint32_t shader_regex_hash;
+
+namespace {
+	struct CompiledRegexCacheEntry {
+		std::shared_ptr<pcre2_code> code;
+		uint64_t last_used_reload = 0;
+	};
+	std::map<std::string, CompiledRegexCacheEntry> compiled_regex_cache;
+	uint64_t regex_cache_reload = 0;
+	const uint32_t regex_compile_options = PCRE2_CASELESS | PCRE2_MULTILINE;
+}
+
+void begin_shader_regex_compile_cache_reload()
+{
+	++regex_cache_reload;
+}
+
+void finish_shader_regex_compile_cache_reload()
+{
+	for (auto entry = compiled_regex_cache.begin(); entry != compiled_regex_cache.end();) {
+		if (entry->second.last_used_reload != regex_cache_reload)
+			entry = compiled_regex_cache.erase(entry);
+		else
+			++entry;
+	}
+}
 
 static void log_pcre2_error_nonl(int err, char *fmt, ...)
 {
@@ -138,14 +164,8 @@ static bool update_dcl_temps(std::string *asm_text, size_t new_val)
 }
 
 ShaderRegexPattern::ShaderRegexPattern() :
-	regex(NULL),
 	do_replace(false)
 {
-}
-
-ShaderRegexPattern::~ShaderRegexPattern()
-{
-	pcre2_code_free(regex);
 }
 
 bool ShaderRegexPattern::compile(std::string *pattern)
@@ -160,22 +180,33 @@ bool ShaderRegexPattern::compile(std::string *pattern)
 	// CASELESS is for compatibility with d3dcompiler_46 & 47 without
 	// having to always remember to account for the dcl_constantbuffer
 	// differences:
-	regex = pcre2_compile((PCRE2_SPTR)pattern->c_str(),
-			pattern->length(), // or PCRE2_ZERO_TERMINATED
-			PCRE2_CASELESS | PCRE2_MULTILINE,
-			&err, &err_off, NULL);
-	if (!regex) {
-		log_pcre2_error_nonl(err, "  WARNING: PCRE2 regex compilation failed at offset %u", (unsigned)err_off);
-		return false;
+	auto cached = compiled_regex_cache.find(*pattern);
+	if (cached != compiled_regex_cache.end()) {
+		regex = cached->second.code;
+		cached->second.last_used_reload = regex_cache_reload;
+	} else {
+		pcre2_code *compiled = pcre2_compile((PCRE2_SPTR)pattern->c_str(),
+				pattern->length(), // or PCRE2_ZERO_TERMINATED
+				regex_compile_options,
+				&err, &err_off, NULL);
+		if (!compiled) {
+			log_pcre2_error_nonl(err, "  WARNING: PCRE2 regex compilation failed at offset %u", (unsigned)err_off);
+			return false;
+		}
+		regex = std::shared_ptr<pcre2_code>(compiled, pcre2_code_free);
+
+		// COMPLETE enables JIT for the matching mode used by pcre2_match.
+		// JIT failure is non-fatal: pcre2_match can use the interpreter.
+		int jit_err = pcre2_jit_compile(regex.get(), PCRE2_JIT_COMPLETE);
+		if (jit_err < 0)
+			LogDebug("PCRE2 JIT compilation unavailable (%d); using interpreter when needed\n", jit_err);
+
+		compiled_regex_cache[*pattern] = { regex, regex_cache_reload };
 	}
 
-	// TODO: Use callback to confirm that JIT does actually get used, as in
-	// some cases pcre2 can fall back to using the slower interpreter
-	pcre2_jit_compile(regex, 0);
-
-	pcre2_pattern_info(regex, PCRE2_INFO_NAMECOUNT, &name_table_count);
-	pcre2_pattern_info(regex, PCRE2_INFO_NAMEENTRYSIZE, &name_table_entry_size);
-	pcre2_pattern_info(regex, PCRE2_INFO_NAMETABLE, &name_table);
+	pcre2_pattern_info(regex.get(), PCRE2_INFO_NAMECOUNT, &name_table_count);
+	pcre2_pattern_info(regex.get(), PCRE2_INFO_NAMEENTRYSIZE, &name_table_entry_size);
+	pcre2_pattern_info(regex.get(), PCRE2_INFO_NAMETABLE, &name_table);
 
 	static_assert(PCRE2_CODE_UNIT_WIDTH == 8, "Need to fix name table parsing for non-8bit pcre2");
 	for (i = 0; i < name_table_count; i++)
@@ -209,11 +240,11 @@ bool ShaderRegexPattern::matches(std::string *asm_text)
 	// insufficient. Can probably store this in the context, as that is
 	// supposed to be per-thread, or use thread local storage.
 
-	match_data = pcre2_match_data_create_from_pattern(regex, NULL);
+	match_data = pcre2_match_data_create_from_pattern(regex.get(), NULL);
 
-	// TODO: Consider using pcre2_jit_match - doco claims 10% faster, but
-	// has less sanity checks. TODO: Use callback to confirm JIT was used
-	rc = pcre2_match(regex, (PCRE2_SPTR)asm_text->c_str(), asm_text->length(), 0, 0, match_data, NULL);
+	// pcre2_match uses the compiled JIT code when this matching mode is
+	// supported and otherwise falls back to the interpreter.
+	rc = pcre2_match(regex.get(), (PCRE2_SPTR)asm_text->c_str(), asm_text->length(), 0, 0, match_data, NULL);
 	if (rc == PCRE2_ERROR_NOMATCH)
 		goto out_free;
 	if (rc < 0) {
@@ -283,11 +314,11 @@ bool ShaderRegexPattern::patch(std::string *asm_text, ShaderRegexTemps *temp_reg
 	// which needs extended substitution processing to be enabled:
 	options = PCRE2_SUBSTITUTE_EXTENDED;
 
-	match_data = pcre2_match_data_create_from_pattern(regex, NULL);
+	match_data = pcre2_match_data_create_from_pattern(regex.get(), NULL);
 
 	output_size = est_size = asm_text->length() + replace_copy.length() + 1024;
 	buf = new PCRE2_UCHAR[output_size];
-	rc = pcre2_substitute(regex,
+	rc = pcre2_substitute(regex.get(),
 			(PCRE2_SPTR)asm_text->c_str(), asm_text->length(), 0,
 			options | PCRE2_SUBSTITUTE_OVERFLOW_LENGTH,
 			match_data, NULL,
@@ -304,7 +335,7 @@ bool ShaderRegexPattern::patch(std::string *asm_text, ShaderRegexTemps *temp_reg
 		delete [] buf;
 		buf = new PCRE2_UCHAR[output_size];
 
-		rc = pcre2_substitute(regex,
+		rc = pcre2_substitute(regex.get(),
 				(PCRE2_SPTR)asm_text->c_str(), asm_text->length(), 0,
 				options, // No PCRE2_SUBSTITUTE_OVERFLOW_LENGTH this time
 				match_data, NULL,
