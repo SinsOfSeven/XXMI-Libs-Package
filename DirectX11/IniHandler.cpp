@@ -2682,11 +2682,11 @@ static uint32_t hash_ini_section(uint32_t hash, const wstring *sname)
 	IniSectionVector *svec = NULL;
 	IniSectionVector::iterator entry;
 
-	hash = crc32c_hw(hash, sname->c_str(), sname->size());
+	hash = crc32c_hw(hash, sname->c_str(), sname->size() * sizeof(wchar_t));
 
 	GetIniSection(&svec, sname->c_str());
 	for (entry = svec->begin(); entry < svec->end(); entry++) {
-		hash = crc32c_hw(hash, entry->raw_line.c_str(), entry->raw_line.size());
+		hash = crc32c_hw(hash, entry->raw_line.c_str(), entry->raw_line.size() * sizeof(wchar_t));
 	}
 
 	return hash;
@@ -2877,6 +2877,7 @@ static void ParseShaderRegexSections()
 	size_t namespace_endpos = 0;
 	uint32_t hash = 0;
 
+	begin_shader_regex_compile_cache_reload();
 	shader_regex_group_index.clear();
 	shader_regex_groups.clear();
 
@@ -2946,6 +2947,7 @@ static void ParseShaderRegexSections()
 		IniWarningW(L"Disabling entire shader regex group\n - [%ls]\n", subsection_names[0].c_str());
 		delete_regex_group(&subsection_names[0]);
 	}
+	finish_shader_regex_compile_cache_reload();
 
 	// When we load ShaderRegex metadata from the cache we need to look up
 	// the command lists and filter_index from the data structures. The
