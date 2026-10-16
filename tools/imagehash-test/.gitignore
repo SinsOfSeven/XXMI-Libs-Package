@@ -1,0 +1,12 @@
+# Game captures pulled out of a frame analysis run, used to confirm the LOD hash
+# and perceptual signature behaviour against real data. Not test inputs - the
+# harness in imagehash_test.cpp generates its own images.
+#
+# Deliberately not committed: these are ~2.6MB of texture dumps extracted from a
+# commercial game, plus ~4.5MB of frame analysis logs. Both are bulky and the
+# textures are not ours to redistribute.
+#
+# Patterns are relative to this directory, not the repository root.
+*.dds
+*.dsc
+*_log.txt

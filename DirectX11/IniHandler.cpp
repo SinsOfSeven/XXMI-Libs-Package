@@ -19,6 +19,7 @@
 #include "ResourcePersist.h"
 #include "ShaderBytecodeRecord.h"
 #include "cursor.h"
+#include "Archive.h"
 #include <chrono>
 
 #include "vector"
@@ -678,8 +679,35 @@ static void ParseIniExcerpt(const wchar_t *excerpt)
 //
 // NOTE: If adding any debugging / logging into this routine and expect to see
 // it, make sure you delay calling it until after the log file has been opened!
+// Parse a namespaced ini file from an in-memory UTF-8 buffer (e.g. a file
+// read out of a mounted archive). BOMs and CRLF line endings are handled here
+// so the parsing code sees the same text as the disk-based path would.
+static void ParseNamespacedIniMemory(const uint8_t *data, size_t size, const wstring *ini_namespace)
+{
+	if (size > 0x7fffffff)
+		return;
+
+	std::wstring wtext = Utf8ToWide(data, size);
+
+	// Normalize CRLF to LF (the disk path gets this for free from the CRT):
+	size_t pos = 0;
+	while ((pos = wtext.find(L"\r\n", pos)) != std::wstring::npos)
+		wtext.replace(pos, 2, L"\n");
+
+	std::wistringstream stream(wtext);
+	ParseIniStream(&stream, ini_namespace);
+}
+
 static void ParseNamespacedIniFile(const wchar_t *ini, const wstring *ini_namespace)
 {
+	// Try the mounted archives first so included configs and the resources
+	// they reference can live inside compressed archives:
+	std::vector<uint8_t> archive_data;
+	if (ReadFileViaArchives(ini, archive_data)) {
+		ParseNamespacedIniMemory(archive_data.data(), archive_data.size(), ini_namespace);
+		return;
+	}
+
 	wifstream f(ini, ios::in, _SH_DENYNO);
 	if (!f) {
 		LogOverlay(LOG_WARNING, "  Error opening %S\n", ini);
@@ -691,6 +719,8 @@ static void ParseNamespacedIniFile(const wchar_t *ini, const wstring *ini_namesp
 
 static void ParseIniFile(const wchar_t *ini)
 {
+	UnmountAllArchives();
+
 	ini_sections.clear();
 
 	return ParseNamespacedIniFile(ini, NULL);
@@ -803,7 +833,15 @@ static bool matches_globbing_vector(wchar_t *filename, vector<pcre2_code*> &patt
 	return false;
 }
 
-static void ParseIniFilesRecursive(wchar_t *migoto_path, const wstring &rel_path, vector<pcre2_code*> &exclude)
+static bool ends_with_insensitive(const wchar_t *str, const wchar_t *suffix)
+{
+	size_t str_len = wcslen(str);
+	size_t suffix_len = wcslen(suffix);
+	return str_len >= suffix_len && _wcsicmp(str + str_len - suffix_len, suffix) == 0;
+}
+
+static void ParseIniFilesRecursive(wchar_t *migoto_path, const wstring &rel_path, vector<pcre2_code*> &exclude,
+	std::unordered_set<wstring> &seen)
 {
 	std::set<wstring, WStringInsensitiveLess> ini_files, directories;
 	WIN32_FIND_DATA find_data;
@@ -833,7 +871,7 @@ static void ParseIniFilesRecursive(wchar_t *migoto_path, const wstring &rel_path
 		if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
 			if (wcscmp(find_data.cFileName, L".") && wcscmp(find_data.cFileName, L".."))
 				directories.insert(wstring(find_data.cFileName));
-		} else if (!wcscmp(find_data.cFileName + wcslen(find_data.cFileName) - 4, L".ini")) {
+		} else if (ends_with_insensitive(find_data.cFileName, L".ini")) {
 			ini_files.insert(wstring(find_data.cFileName));
 		} else {
 			LogDebug("    Not a directory or ini file: \"%S\"\n", find_data.cFileName);
@@ -845,13 +883,106 @@ static void ParseIniFilesRecursive(wchar_t *migoto_path, const wstring &rel_path
 	for (wstring i: ini_files) {
 		ini_namespace = rel_path + wstring(L"\\") + i;
 		ini_path = wstring(migoto_path) + ini_namespace;
+		if (seen.count(ini_namespace)) {
+			IniWarningW(L"File included multiple times: %ls\n - [%ls]\n", ini_namespace.c_str(), L"include_recursive");
+			continue;
+		}
+		seen.insert(ini_namespace);
 		LogInfo("    Processing \"%S\"\n", ini_path.c_str());
 		ParseNamespacedIniFile(ini_path.c_str(), &ini_namespace);
 	}
 
 	for (wstring i: directories) {
 		ini_namespace = rel_path + wstring(L"\\") + i;
-		ParseIniFilesRecursive(migoto_path, ini_namespace, exclude);
+		ParseIniFilesRecursive(migoto_path, ini_namespace, exclude, seen);
+	}
+}
+
+// Parse every .ini file inside a mounted archive, namespaced by the directory
+// the archive sits in (standard include rules). Shared by the explicit
+// "[Include] archive = ..." key and by recursive archive discovery.
+static void ParseArchiveIniEntries(const wchar_t *migoto_path, const wstring &mount_dir,
+	std::unordered_set<wstring> &seen, const wchar_t *section_id)
+{
+	ForEachArchiveFile(mount_dir, [&](const wstring &logical_path, bool is_dir) {
+		if (is_dir)
+			return;
+		if (logical_path.size() < 4 ||
+			_wcsicmp(logical_path.c_str() + logical_path.size() - 4, L".ini") != 0)
+			return;
+
+		LogInfoW(L"  archive: %ls\n", logical_path.c_str());
+
+		if (seen.count(logical_path)) {
+			if (section_id && *section_id)
+				IniWarningW(L"File included multiple times: %ls\n - [%ls]\n", logical_path.c_str(), section_id);
+			else
+				IniWarningW(L"File included multiple times: %ls\n", logical_path.c_str());
+			return;
+		}
+		seen.insert(logical_path);
+
+		wstring ini_path = wstring(migoto_path) + logical_path;
+		ParseNamespacedIniFile(ini_path.c_str(), &logical_path);
+	});
+}
+
+// Recursively discover ".zip" archives below rel_path and include every .ini
+// file they contain using the standard include rules. A discovered archive is
+// treated as a folder named after the archive: if its name matches an
+// exclude pattern the whole archive is skipped. Zips nested inside other zips
+// are not opened.
+static void ParseArchivesRecursive(wchar_t *migoto_path, const wstring &rel_path,
+	vector<pcre2_code*> &exclude, std::unordered_set<wstring> &seen)
+{
+	std::set<wstring, WStringInsensitiveLess> archive_files, directories;
+	WIN32_FIND_DATA find_data;
+	HANDLE hFind;
+	wstring search_path, archive_path;
+
+	search_path = wstring(migoto_path) + rel_path + L"\\*";
+	LogInfo("    Searching \"%S\"\n", search_path.c_str());
+
+	// Same deterministic ordering as ParseIniFilesRecursive: read the whole
+	// directory, sort case-insensitively, process in a fixed order.
+
+	hFind = FindFirstFile(search_path.c_str(), &find_data);
+	if (hFind == INVALID_HANDLE_VALUE) {
+		LogInfo("    Recursive archive path \"%S\" not found\n", search_path.c_str());
+		return;
+	}
+
+	do {
+		if (matches_globbing_vector(find_data.cFileName, exclude)) {
+			LogInfo("    Excluding \"%S\"\n", find_data.cFileName);
+			continue;
+		}
+
+		if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+			if (wcscmp(find_data.cFileName, L".") && wcscmp(find_data.cFileName, L".."))
+				directories.insert(wstring(find_data.cFileName));
+		} else if (ends_with_insensitive(find_data.cFileName, L".zip")) {
+			archive_files.insert(wstring(find_data.cFileName));
+		} else {
+			LogDebug("    Not a directory or zip file: \"%S\"\n", find_data.cFileName);
+		}
+	} while (FindNextFile(hFind, &find_data));
+
+	FindClose(hFind);
+
+	// Mount every zip in this directory, then parse the ini files from all
+	// of them in one pass — ForEachArchiveFile matches every archive mounted
+	// under the directory, not just the one that was just mounted:
+	for (wstring i : archive_files) {
+		archive_path = rel_path + wstring(L"\\") + i;
+		MountArchive(archive_path);  // Errors already logged
+	}
+
+	if (!archive_files.empty())
+		ParseArchiveIniEntries(migoto_path, rel_path + wstring(L"\\"), seen, NULL);
+
+	for (wstring i : directories) {
+		ParseArchivesRecursive(migoto_path, rel_path + wstring(L"\\") + i, exclude, seen);
 	}
 }
 
@@ -1540,6 +1671,7 @@ static void ParseIncludedIniFiles()
 	wstring namespace_path, rel_path, ini_path;
 	wchar_t migoto_path[MAX_PATH];
 	vector<pcre2_code*> exclude;
+	vector<pcre2_code*> exclude_archives;
 
 	recursive_includes.clear();
 
@@ -1553,6 +1685,16 @@ static void ParseIncludedIniFiles()
 	// Do this before removing [Include] from ini_sections. TODO: Allow
 	// recursively included files to modify the exclude mid-recursion:
 	exclude = globbing_vector_to_regex(GetIniStringMultipleKeys(L"Include", L"exclude_recursive"));
+	exclude_archives = globbing_vector_to_regex(GetIniStringMultipleKeys(L"Include", L"exclude_archive_recursive"));
+
+	// Archive behaviour settings are honoured only in the unnamed [Include]
+	// section (not in any namespaced [Include <NAME>] section), mirroring how
+	// exclude_recursive / exclude_archive_recursive are handled above, and
+	// must be applied before any archive is mounted below:
+	G->archive_disk_fallback = GetIniBool(L"Include", L"archive_disk_fallback", false, NULL);
+	G->max_archive_entry_size = GetIniInt(L"Include", L"max_archive_entry_size", 64, NULL);
+	if (G->max_archive_entry_size > 0)
+		SetMaxArchiveEntrySize((size_t)G->max_archive_entry_size * 1024 * 1024);
 
 	do {
 		// To safely allow included files to include more files, we
@@ -1595,12 +1737,24 @@ static void ParseIncludedIniFiles()
 
 				switch (key->size())
 				{
-				case 7: // include
+				case 7: // include / archive
 					if (!wcscmp(key->c_str(), L"include")) {
 						ini_path = wstring(migoto_path) + rel_path;
 						ParseNamespacedIniFile(ini_path.c_str(), &rel_path);
 						continue;
 					}
+				if (!wcscmp(key->c_str(), L"archive")) {
+					// Mount a (compressed) archive and parse every ini
+					// file it contains, namespaced by the directory the
+					// archive sits in so its resources resolve relative
+					// to that same directory:
+					wstring mount_dir = MountArchive(rel_path);
+					if (mount_dir.empty())
+						continue;  // Error already logged
+
+					ParseArchiveIniEntries(migoto_path, mount_dir, seen, section_id->c_str());
+					continue;
+				}
 					break;
 
 				case 11: // user_config
@@ -1613,12 +1767,41 @@ static void ParseIncludedIniFiles()
 				case 17: // include_recursive / exclude_recursive
 					if (key->c_str()[0] == L'i') {
 						if (!wcscmp(key->c_str(), L"include_recursive")) {
-							ParseIniFilesRecursive(migoto_path, rel_path, exclude);
+							ParseIniFilesRecursive(migoto_path, rel_path, exclude, seen);
 							continue;
 						}
 					}
 					else if (key->c_str()[0] == L'e') {
 						if (!wcscmp(key->c_str(), L"exclude_recursive")) {
+							// Handled above
+							continue;
+						}
+					}
+					break;
+
+				case 21: // archive_disk_fallback
+					if (!wcscmp(key->c_str(), L"archive_disk_fallback")) {
+						// Handled above
+						continue;
+					}
+					break;
+
+				case 22: // max_archive_entry_size
+					if (!wcscmp(key->c_str(), L"max_archive_entry_size")) {
+						// Handled above
+						continue;
+					}
+					break;
+
+				case 25: // include_archive_recursive / exclude_archive_recursive
+					if (key->c_str()[0] == L'i') {
+						if (!wcscmp(key->c_str(), L"include_archive_recursive")) {
+							ParseArchivesRecursive(migoto_path, rel_path, exclude_archives, seen);
+							continue;
+						}
+					}
+					else if (key->c_str()[0] == L'e') {
+						if (!wcscmp(key->c_str(), L"exclude_archive_recursive")) {
 							// Handled above
 							continue;
 						}
@@ -1633,6 +1816,7 @@ static void ParseIncludedIniFiles()
 	} while (!include_sections.empty());
 
 	free_globbing_vector(exclude);
+	free_globbing_vector(exclude_archives);
 }
 
 static void ParsePersistentSettings()
@@ -2135,7 +2319,11 @@ static CustomResource* ParseResourceSection(const wchar_t* section_name, const w
 			wcsrchr(path, L'\\')[1] = 0;
 			wcscat(path, namespace_path.c_str());
 			wcscat(path, setting);
-			if (GetFileAttributes(path) != INVALID_FILE_ATTRIBUTES)
+			// This resource may live inside a mounted archive instead of on
+			// disk, so probe the VFS too before falling back to a path
+			// relative to the 3DMigoto directory:
+			if (GetFileAttributes(path) != INVALID_FILE_ATTRIBUTES ||
+				PathExistsInArchives(path))
 				found = true;
 		}
 		if (!found) {

@@ -19,6 +19,7 @@
 #include "profiling.h"
 #include "Hunting.h"
 #include "cursor.h"
+#include "Archive.h"
 
 #include <D3DCompiler.h>
 
@@ -6804,29 +6805,71 @@ void CustomResource::Substantiate(ID3D11Device *mOrigDevice1,
 	ResourcePersistObserve(this);
 }
 
+// Reads a whole resource file into memory, preferring a real file on disk
+// (which acts as an override) over the VFS (mounted compression archives).
+// Returns false if the resource exists in neither:
+static bool ReadResourceFileBytes(const wstring &filename, std::vector<uint8_t> &out)
+{
+	if (G->archive_disk_fallback) {
+		// Legacy behaviour: a loose file on disk wins over a mounted archive.
+		{
+			HANDLE f = CreateFile(filename.c_str(), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+			if (f != INVALID_HANDLE_VALUE) {
+				DWORD size = GetFileSize(f, 0);
+				out.resize(size);
+				DWORD read = 0;
+				bool ok = (size == 0 || (ReadFile(f, out.data(), size, &read, 0) != FALSE && read == size));
+				CloseHandle(f);
+				if (ok)
+					return true;
+			}
+		}
+
+		return ReadFileViaArchives(filename, out);
+	}
+
+	// Default behaviour: when a mounted archive covers the path, the archive
+	// is the sole source of truth — a loose disk copy must not silently
+	// substitute for an archive we cannot satisfy. This makes archive read
+	// failures loud instead of masking them with stale loose files.
+	if (IsPathCoveredByArchive(filename))
+		return ReadFileViaArchives(filename, out);
+
+	// Not covered by any archive: plain disk read.
+	HANDLE f = CreateFile(filename.c_str(), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (f != INVALID_HANDLE_VALUE) {
+		DWORD size = GetFileSize(f, 0);
+		out.resize(size);
+		DWORD read = 0;
+		bool ok = (size == 0 || (ReadFile(f, out.data(), size, &read, 0) != FALSE && read == size));
+		CloseHandle(f);
+		return ok;
+	}
+
+	return false;
+}
+
 void CustomResource::LoadBufferFromFile(ID3D11Device *mOrigDevice1)
 {
-	DWORD size, read_size;
+	DWORD size;
 	void *buf = NULL;
-	HANDLE f;
 
-	f = CreateFile(filename.c_str(), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (f == INVALID_HANDLE_VALUE) {
+	// Load via the VFS (mounted archives) or the filesystem, whichever can
+	// satisfy the resource path:
+	std::vector<uint8_t> data;
+	if (!ReadResourceFileBytes(filename, data)) {
 		LogOverlayW(LOG_WARNING, L"Failed to load custom buffer resource %ls: %d\n", filename.c_str(), GetLastError());
 		return;
 	}
 
-	size = GetFileSize(f, 0);
+	size = (DWORD)data.size();
 	buf = malloc(size); // malloc to allow realloc to resize it if the user overrode the size
 	if (!buf) {
 		LogOverlayW(LOG_DIRE, L"Out of memory loading %ls\n", filename.c_str());
-		goto out_close;
+		return;
 	}
-
-	if (!ReadFile(f, buf, size, &read_size, 0) || size != read_size) {
-		LogOverlayW(LOG_WARNING, L"Error reading custom buffer from file %ls\n", filename.c_str());
-		goto out_delete;
-	}
+	if (size)
+		memcpy(buf, data.data(), size);
 
 	SubstantiateBuffer(mOrigDevice1, &buf, size);
 
@@ -6836,15 +6879,37 @@ void CustomResource::LoadBufferFromFile(ID3D11Device *mOrigDevice1)
 	//if(G->track_region_hashes)
 	//	InitializeHandleInfo(buf, buf_size);
 
-out_delete:
-	//if (!G->track_region_hashes)
 	free(buf);
-out_close:
-	CloseHandle(f);
+}
+
+// Scans raw PNG bytes for an sRGB chunk (see HasPNGsRGBChunk):
+static bool HasPNGsRGBChunkInData(const uint8_t *data, size_t size)
+{
+	if (size < 8 || memcmp(data, "\x89PNG\r\n\x1a\n", 8) != 0)
+		return false; // Not a png
+	size_t pos = 8;
+	while (pos + 8 <= size) {
+		uint32_t chunk_size = ((uint32_t)data[pos] << 24) |
+							  ((uint32_t)data[pos + 1] << 16) |
+							  ((uint32_t)data[pos + 2] << 8) |
+							  data[pos + 3];
+		if (memcmp(data + pos + 4, "sRGB", 4) == 0) // sRGB found
+			return true;
+		if (memcmp(data + pos + 4, "IDAT", 4) == 0) // IDAT found
+			break;
+		if (chunk_size > size || pos + 12 + chunk_size > size) // Corrupt png
+			break;
+		pos += 12 + chunk_size; // Skip length + type + data + crc
+	}
+	return false;
 }
 
 bool CustomResource::HasPNGsRGBChunk(wstring filename)
 {
+	std::vector<uint8_t> vfs_data;
+	if (ReadFileViaArchives(filename, vfs_data))
+		return HasPNGsRGBChunkInData(vfs_data.data(), vfs_data.size());
+
 	FILE *f = _wfopen(filename.c_str(), L"rb");
 	if (f != nullptr) {
 		unsigned char signature[8];
@@ -6924,17 +6989,26 @@ void CustomResource::LoadFromFile(ID3D11Device *mOrigDevice1)
 	// Needs to be called at some point before CreateXXXTextureFromFile:
 	EnsureCOM();
 
+	// Load the raw resource bytes via the VFS or the filesystem and hand
+	// them to the DirectXTK memory loaders, so that resources living inside
+	// compressed archives load identically to those on disk:
+	std::vector<uint8_t> data;
+	if (!ReadResourceFileBytes(filename, data)) {
+		LogOverlayW(LOG_WARNING, L"Failed to load custom texture resource %ls: %d\n", filename.c_str(), GetLastError());
+		return;
+	}
+
 	ext = filename.substr(filename.rfind(L"."));
 	if (!_wcsicmp(ext.c_str(), L".dds")) {
 		LogInfoW(L"Loading custom resource %s as DDS, bind_flags=0x%03x\n", filename.c_str(), bind_flags);
-		hr = DirectX::CreateDDSTextureFromFileEx(mOrigDevice1,
-				filename.c_str(), 0,
+		hr = DirectX::CreateDDSTextureFromMemoryEx(mOrigDevice1,
+				data.data(), data.size(), 0,
 				D3D11_USAGE_DEFAULT, bind_flags, 0, misc_flags,
-				override_color_space == CustomColorSpace::SRGB, &resource, NULL, NULL);
+				override_color_space == CustomColorSpace::SRGB, &resource, NULL);
 	} else {
 		LogInfoW(L"Loading custom resource %s as WIC, bind_flags=0x%03x\n", filename.c_str(), bind_flags);
-		hr = DirectX::CreateWICTextureFromFileEx(mOrigDevice1,
-				filename.c_str(), 0,
+		hr = DirectX::CreateWICTextureFromMemoryEx(mOrigDevice1,
+				data.data(), data.size(), 0,
 				D3D11_USAGE_DEFAULT, bind_flags, 0, misc_flags,
 				GetWICFlags(filename), &resource, NULL);
 	}
