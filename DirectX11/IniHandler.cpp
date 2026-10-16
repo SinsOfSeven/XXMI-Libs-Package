@@ -15,6 +15,8 @@
 #include "Override.h"
 #include "Hunting.h"
 #include "ShaderRegex.h"
+#include "BlobStore.h"
+#include "ShaderBytecodeRecord.h"
 #include "cursor.h"
 #include <chrono>
 
@@ -2693,11 +2695,11 @@ static uint32_t hash_ini_section(uint32_t hash, const wstring *sname)
 	IniSectionVector *svec = NULL;
 	IniSectionVector::iterator entry;
 
-	hash = crc32c_hw(hash, sname->c_str(), sname->size());
+	hash = crc32c_hw(hash, sname->c_str(), sname->size() * sizeof(wchar_t));
 
 	GetIniSection(&svec, sname->c_str());
 	for (entry = svec->begin(); entry < svec->end(); entry++) {
-		hash = crc32c_hw(hash, entry->raw_line.c_str(), entry->raw_line.size());
+		hash = crc32c_hw(hash, entry->raw_line.c_str(), entry->raw_line.size() * sizeof(wchar_t));
 	}
 
 	return hash;
@@ -2888,6 +2890,7 @@ static void ParseShaderRegexSections()
 	size_t namespace_endpos = 0;
 	uint32_t hash = 0;
 
+	begin_shader_regex_compile_cache_reload();
 	shader_regex_group_index.clear();
 	shader_regex_groups.clear();
 
@@ -2957,6 +2960,7 @@ static void ParseShaderRegexSections()
 		IniWarningW(L"Disabling entire shader regex group\n - [%ls]\n", subsection_names[0].c_str());
 		delete_regex_group(&subsection_names[0]);
 	}
+	finish_shader_regex_compile_cache_reload();
 
 	// When we load ShaderRegex metadata from the cache we need to look up
 	// the command lists and filter_index from the data structures. The
@@ -5005,6 +5009,22 @@ void LoadConfigFile()
 	}
 
 	G->CACHE_SHADERS = GetIniBool(L"Rendering", L"cache_shaders", false, NULL);
+	G->DISABLE_REGEX_CACHE = GetIniBool(L"Rendering", L"disable_shader_regex_cache", false, NULL);
+	// Read-ahead target for the packed cache blob, in bytes. 0 disables it.
+	// Clamped here as well as at the read site so a bad value is rejected once,
+	// rather than silently on every read. Note std::max is unusable here:
+	// windows.h defines max as a macro, which cannot take a call as an argument.
+	int read_ahead = GetIniInt(L"Rendering", L"shader_cache_read_ahead",
+			(int)BlobStore::read_ahead_default(), NULL);
+	if (read_ahead < 0) {
+		LogWarning("shader_cache_read_ahead: %d is negative, using 0 (read-ahead off)\n", read_ahead);
+		read_ahead = 0;
+	}
+	uint64_t clamped = BlobStore::clamp_read_ahead((uint64_t)read_ahead);
+	if (clamped != (uint64_t)read_ahead)
+		LogWarning("shader_cache_read_ahead: %d exceeds the %Iu byte maximum, clamping\n",
+				read_ahead, BlobStore::read_ahead_max());
+	BlobStore::set_read_ahead_size(clamped);
 	G->SCISSOR_DISABLE = GetIniBool(L"Rendering", L"rasterizer_disable_scissor", false, NULL);
 	G->track_texture_updates = GetIniBoolOrInt(L"Rendering", L"track_texture_updates", 0, NULL);
 
@@ -5541,6 +5561,14 @@ void ReloadConfig(HackerDevice *device)
 
 		MarkAllShadersDeferredUnprocessed();
 	}
+
+	// Make any deferred ShaderRegex cache metadata writes durable before the
+	// reload finishes, so a subsequent (non-generation-changing) reload doesn't
+	// lose records that were still sitting in the dirty buffer:
+	if (!shader_regex_cache_flush())
+		LogWarning("ShaderRegexCache: reload flush FAILED\n");
+	if (!shader_bytecode_record_flush())
+		LogWarning("ShaderBytecodeRecord: reload flush FAILED\n");
 
 	// Execute the [Constants] command list in the immediate context to
 	// initialise iniParams and perform any other custom initialisation the

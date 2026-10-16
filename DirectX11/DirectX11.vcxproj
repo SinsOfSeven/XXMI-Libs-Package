@@ -68,7 +68,10 @@
     <ClCompile Include="Override.cpp" />
     <ClCompile Include="profiling.cpp" />
     <ClCompile Include="ResourceHash.cpp" />
+    <ClCompile Include="ShaderBytecodeRecord.cpp" />
     <ClCompile Include="ShaderRegex.cpp" />
+    <ClCompile Include="BlobStore.cpp" />
+    <ClCompile Include="ShaderBytecodeValidation.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="d3d11Wrapper.def" />
@@ -104,7 +107,11 @@
     <ClInclude Include="Override.h" />
     <ClInclude Include="profiling.h" />
     <ClInclude Include="ResourceHash.h" />
+    <ClInclude Include="ShaderBytecodeRecord.h" />
     <ClInclude Include="ShaderRegex.h" />
+    <ClInclude Include="ShaderStage.h" />
+    <ClInclude Include="BlobStore.h" />
+    <ClInclude Include="ShaderBytecodeValidation.h" />
     <ClInclude Include="..\vkeys.h" />
   </ItemGroup>
   <ItemGroup>

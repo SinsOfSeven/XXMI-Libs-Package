@@ -3,6 +3,7 @@
 #include "CommandList.h"
 
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -14,6 +15,23 @@ enum class ShaderRegexCache {
 	NO_MATCH,
 	MATCH,
 	PATCH
+};
+
+// Why load_shader_regex_cache() fell through to NO_CACHE. Lets callers and
+// diagnostics tell an ordinary cold-cache miss apart from a corrupted read or
+// a deliberately disabled cache so an adaptive/failure path can react:
+enum class ShaderRegexCacheFailureReason {
+	NONE,
+	DISABLED,             // DISABLE_REGEX_CACHE toggle in effect
+	NO_CACHE_PATH,        // SHADER_CACHE_PATH not configured
+	INVALID_STAGE,        // shader stage is not a known D3D11 stage
+	STALE_GENERATION,     // cache present and well formed, but for a previous
+	                       // ShaderRegex generation - normal after a config edit
+	CORRUPT_METADATA,     // cache absent, unreadable, or failed validation
+	NO_RECORD,            // no cached record for this shader (cold miss)
+	MATCH_POOL_OOB,       // cached match ids point outside the current group index
+	RECORD_NO_BYTECODE,   // PATCH record whose bytecode was never assembled
+	BLOB_READ_FAILED,     // patched bytecode could not be read back from the blob
 };
 
 bool get_shader_model_from_bytecode(const void* data, size_t size, std::string* out_model);
@@ -58,9 +76,14 @@ struct ShaderBindings
 };
 
 void link_shader_regex_groups_without_patterns(const wchar_t* shader_type, std::string* shader_model, UINT64 hash, bool* decompilation_required);
-bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline);
-ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode, std::wstring *tagline);
+// cache_result controls whether the match set is written to the packed
+// ShaderRegex cache. It must be false for the hunting/dump path, which
+// re-disassembles the original shader rather than reusing the cached analysis
+// and would therefore replace a good cache entry with a different computation.
+bool apply_shader_regex_groups(std::string *asm_text, const wchar_t *shader_type, std::string *shader_model, UINT64 hash, std::wstring *tagline, bool cache_result = true);
+ShaderRegexCache load_shader_regex_cache(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode, std::wstring *tagline, ShaderRegexCacheFailureReason *reason = nullptr);
 void save_shader_regex_cache_bin(UINT64 hash, const wchar_t *shader_type, vector<byte> *bytecode);
+bool shader_regex_cache_flush();
 bool unlink_shader_regex_command_lists_and_filter_index(UINT64 shader_hash);
 
 typedef std::set<std::string> ShaderRegexTemps;
@@ -68,7 +91,7 @@ typedef std::set<std::string> ShaderRegexModels;
 
 class ShaderRegexPattern {
 public:
-	pcre2_code *regex;
+	std::shared_ptr<pcre2_code> regex;
 	std::string replace;
 
 	bool do_replace;
@@ -80,13 +103,18 @@ public:
 	std::set<std::string> named_capture_groups;
 
 	ShaderRegexPattern();
-	~ShaderRegexPattern();
 
 	bool compile(std::string *pattern);
 	bool named_group_overlaps(ShaderRegexTemps &other_set);
 	bool matches(std::string *asm_text);
 	bool patch(std::string *asm_text, ShaderRegexTemps *temp_regs, unsigned dcl_temps);
 };
+
+// Keep compiled PCRE2 programs alive across INI reloads when their pattern
+// text and compile options are unchanged. Call around ShaderRegex parsing so
+// entries no longer referenced by the new configuration can be released.
+void begin_shader_regex_compile_cache_reload();
+void finish_shader_regex_compile_cache_reload();
 
 // These are sorted to make sure we get consistent results between runs
 // in case the user does something that winds up depending on the order:

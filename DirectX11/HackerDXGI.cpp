@@ -69,6 +69,8 @@
 #include "Override.h"
 #include "IniHandler.h"
 #include "CommandList.h"
+#include "ShaderRegex.h"
+#include "ShaderBytecodeRecord.h"
 #include "profiling.h"
 #include "cursor.h" // For InstallHookLate
 
@@ -199,6 +201,19 @@ void HackerSwapChain::RunFrameActions()
 	// Regardless of log settings, since this runs every frame, let's flush the log
 	// so that the most lost will be one frame worth.  Tradeoff of performance to accuracy
 	if (LogFile) fflush(LogFile);
+
+	// Same idea for the ShaderRegex cache metadata: new records are written
+	// every time a shader is first analysed, so instead of rewriting the
+	// metadata per shader we defer to here. The dirty check happens inside
+	// shader_regex_cache_flush() before it takes the cache mutex, so the common
+	// no-op frame does no work. The frame that does flush, or that races a
+	// shader's first analysis, can still wait on that mutex - ensure_valid()
+	// holds it across a metadata read/write. That is the same order of cost as
+	// the log fflush above.
+	if (!shader_regex_cache_flush())
+		LogWarning("ShaderRegexCache: per-frame flush FAILED\n");
+	if (!shader_bytecode_record_flush())
+		LogWarning("ShaderBytecodeRecord: per-frame flush FAILED\n");
 
 	uint64_t system_tick_count = GetSystemTicks();
 
