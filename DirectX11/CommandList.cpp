@@ -8211,16 +8211,13 @@ IniParserResult ShaderTarget::ParseTargetMember(
 		return IniParserResult::TOKEN_NOT_FOUND;
 
 	static constexpr MemberInfo members[] = {
-		{ L"->cb_mask",         9, ShaderTargetEvaluationMode::DCL_CB_MASK },
 		{ L"->cb_min",          8, ShaderTargetEvaluationMode::DCL_CB_MIN },
 		{ L"->cb_max",          8, ShaderTargetEvaluationMode::DCL_CB_MAX },
+		{ L"->cb_mask",         9, ShaderTargetEvaluationMode::DCL_CB_MASK },
 		{ L"->cb_type",         9, ShaderTargetEvaluationMode::DCL_CB_TYPE, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },
 		{ L"->cb_size",         9, ShaderTargetEvaluationMode::DCL_CB_SIZE, {{
-			MemberArg::Type::Unsigned, // Slot ID
-		}} },
-		{ L"->srv_declares",   14, ShaderTargetEvaluationMode::DCL_SRV_DECLARES, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },
 		{ L"->srv_min",         9, ShaderTargetEvaluationMode::DCL_SRV_MIN },
@@ -8229,6 +8226,9 @@ IniParserResult ShaderTarget::ParseTargetMember(
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },
 		{ L"->srv_stride",     12, ShaderTargetEvaluationMode::DCL_SRV_STRIDE, {{
+			MemberArg::Type::Unsigned, // Slot ID
+		}} },
+		{ L"->srv_declares",   14, ShaderTargetEvaluationMode::DCL_SRV_DECLARES, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },
 		{ L"->srv_dimension",  15, ShaderTargetEvaluationMode::DCL_SRV_DIMENSION, {{
