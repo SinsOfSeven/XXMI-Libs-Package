@@ -3017,6 +3017,7 @@ wchar_t *TextureOverrideIniKeys[] = {
 	L"height_multiply",
 	L"override_byte_stride",
 	L"override_vertex_count",
+	L"extend_vertex_count",
 	L"uav_byte_stride",
 	L"iteration",
 	L"filter_index",
@@ -3224,6 +3225,31 @@ static void parse_texture_override_common(const wchar_t *id, TextureOverride *ov
 		} else {
 			// Do not override original buffer size.
 			override->override_byte_width = -1;
+		}
+
+		// `extend_vertex_count` adds vertex space on top of the buffer size
+		// resolved above (the highest override_vertex_count for the hash, the
+		// original size, or the VertexLimitRaise default), instead of setting
+		// an absolute size like override_vertex_count does.
+		int extend_vertex_count = GetIniInt(id, L"extend_vertex_count", -1.0f, &found);
+		if (extend_vertex_count > 0) {
+			if (override_vertex_count > 0) {
+				// The two keys are exclusive; the absolute override takes
+				// precedence, so only report the misuse and keep its behaviour.
+				LogOverlayW(LOG_DIRE, L"extend_vertex_count cannot be used together with override_vertex_count, ignoring the extension!\n - [%ls]\n", override->ini_section.c_str());
+			} else {
+				// Ensure that stride is specified, same as override_vertex_count.
+				int override_byte_stride = GetIniInt(id, L"override_byte_stride", -1, NULL);
+				if (override_byte_stride <= 0) {
+					LogOverlayW(LOG_DIRE, L"Failed to detect stride for extend_vertex_count=%d, please set override_byte_stride!\n - [%ls]\n", extend_vertex_count, override->ini_section.c_str());
+					return;
+				}
+				// This section's contribution to the extension. Contributions
+				// of every section sharing the hash are summed at the end of
+				// parsing and applied once when the buffer is created, so that
+				// multiple sections can safely extend the same buffer.
+				override->override_extend_byte_width = override_byte_stride * extend_vertex_count;
+			}
 		}
 	}
 	
@@ -3649,6 +3675,38 @@ static void update_byte_width_overrides(map<uint32_t, int>& max_byte_width_map)
 	}
 }
 
+static void index_extend_byte_width_override(TextureOverride* override, uint32_t hash, map<uint32_t, int>& total_extend_width_map)
+{
+	// Unlike override_byte_width, which keeps the largest single value for a
+	// hash, extensions are additive: every section extending the same buffer
+	// contributes, and the whole summed extension is applied once at buffer
+	// creation so sections do not race each other.
+	total_extend_width_map[hash] += override->override_extend_byte_width;
+}
+
+static void update_extend_byte_width_overrides(map<uint32_t, int>& total_extend_width_map)
+{
+	map<uint32_t, int>::iterator total_extend_width;
+
+	TextureOverrideMap::iterator i;
+	TextureOverrideList::iterator j;
+	TextureOverride* t;
+
+	for (total_extend_width = total_extend_width_map.begin(); total_extend_width != total_extend_width_map.end(); total_extend_width++) {
+		i = lookup_textureoverride(total_extend_width->first);
+
+		if (i == G->mTextureOverrideMap.end())
+			return;
+
+		// Every section sharing the hash sees the total extension, so it
+		// applies regardless of which section matches at buffer creation.
+		for (j = i->second.begin(); j != i->second.end(); j++) {
+			t = &(*j);
+			t->override_extend_byte_width = total_extend_width->second;
+		}
+	}
+}
+
 static void ParseTextureOverrideSections()
 {
 	IniSections::iterator lower, upper, i;
@@ -3659,6 +3717,7 @@ static void ParseTextureOverrideSections()
 	bool found;
 	bool lod_hash_found;
 	map<uint32_t, int> max_byte_width_map;
+	map<uint32_t, int> total_extend_width_map;
 
 	// Lock entire routine, this can be re-inited.  These shaderoverrides
 	// are unlikely to be changing much, but for consistency.
@@ -3749,10 +3808,15 @@ static void ParseTextureOverrideSections()
 	if (override->override_byte_width != -1) {
 		index_byte_width_override(override, hash, max_byte_width_map);
 	}
+	if (override->override_extend_byte_width > 0)
+		index_extend_byte_width_override(override, hash, total_extend_width_map);
 }
 
 	// Apply the largest per-hash buffer size overridesto all relevant TextureOverride sections.
 	update_byte_width_overrides(max_byte_width_map);
+
+	// Apply the summed per-hash buffer extensions to all relevant TextureOverride sections.
+	update_extend_byte_width_overrides(total_extend_width_map);
 
 	for (auto &tolkv : G->mTextureOverrideMap) {
 		// Sort the TextureOverride sections sharing the same hash to

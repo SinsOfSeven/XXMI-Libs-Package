@@ -1882,6 +1882,19 @@ STDMETHODIMP_(void) HackerContext::SOSetTargets(THIS_
 	__in_ecount_opt(NumBuffers)  const UINT *pOffsets)
 {
 	 mOrigContext1->SOSetTargets(NumBuffers, ppSOTargets, pOffsets);
+
+	// Track the application's stream output bindings for the accumulated draw
+	// counts. Any call (bind or unbind) bumps the generation so the counts
+	// reset against the new bindings; the mod's own stream output copies go
+	// through the raw original context, so they don't reach this hook.
+	m_so_targets_bound = false;
+	for (UINT i = 0; ppSOTargets && i < NumBuffers; ++i) {
+		if (ppSOTargets[i]) {
+			m_so_targets_bound = true;
+			break;
+		}
+	}
+	m_so_binding_generation++;
 }
 
 bool HackerContext::BeforeDispatch(DispatchContext *context)
@@ -2210,15 +2223,21 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 
 		TextureOverride* textureOverride = NULL;
 		int override_byte_width = -1;
+		int override_extend_byte_width = 0;
 
 		for (unsigned i = 0; i < matches.size(); i++) {
 			textureOverride = matches[i];
 			if (textureOverride->override_byte_width > override_byte_width) {
 				override_byte_width = textureOverride->override_byte_width;
 			}
+			if (textureOverride->override_extend_byte_width > override_extend_byte_width) {
+				override_extend_byte_width = textureOverride->override_extend_byte_width;
+			}
 		}
 
-		if (override_byte_width != -1) {
+		// Extended buffers are also larger than the source resource, so they
+		// need the CopySubresourceRegion path as well.
+		if (override_byte_width != -1 || override_extend_byte_width > 0) {
 			mOrigContext1->CopySubresourceRegion(
 				pDstResource,           // pDstResource
 				0,                      // DstSubresource (0 for buffers)
