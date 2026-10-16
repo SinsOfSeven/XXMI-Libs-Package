@@ -436,22 +436,22 @@ bool FilterMatch::update_types_matched()
 // template lets the concrete FilterMatch::matches() overloads be resolved by
 // the caller's descriptor type.
 template <typename DescType>
-static bool filter_expr_matches(const FilterExpr &expr, const uint64_t *resource_hash, const DescType *desc, const DrawCallInfo *call_info)
+static bool filter_expr_matches(const FilterExpr &expr, const uint64_t *resource_hash, const DescType *desc, const DrawCallInfo *call_info, const FilterExpr::HashMatcher *hash_matcher)
 {
 	switch (expr.op) {
 		case FilterExprOp::LEAF:
 			return expr.leaf && expr.leaf->matches(desc, call_info);
 		case FilterExprOp::HASH:
-			return resource_hash && expr.hash == *resource_hash;
+			return hash_matcher ? (*hash_matcher)(expr.hash) : (resource_hash && expr.hash == *resource_hash);
 		case FilterExprOp::AND:
 			for (const auto &child : expr.children) {
-				if (child && !filter_expr_matches(*child, resource_hash, desc, call_info))
+				if (child && !filter_expr_matches(*child, resource_hash, desc, call_info, hash_matcher))
 					return false;
 			}
 			return true;
 		case FilterExprOp::OR:
 			for (const auto &child : expr.children) {
-				if (child && filter_expr_matches(*child, resource_hash, desc, call_info))
+				if (child && filter_expr_matches(*child, resource_hash, desc, call_info, hash_matcher))
 					return true;
 			}
 			return false;
@@ -460,41 +460,41 @@ static bool filter_expr_matches(const FilterExpr &expr, const uint64_t *resource
 			// the operator stays associative for longer chains.
 			bool result = false;
 			for (const auto &child : expr.children) {
-				if (child && filter_expr_matches(*child, resource_hash, desc, call_info))
+				if (child && filter_expr_matches(*child, resource_hash, desc, call_info, hash_matcher))
 					result = !result;
 			}
 			return result;
 		}
 		case FilterExprOp::NOT:
 			return expr.children.size() == 1
-				&& !filter_expr_matches(*expr.children[0], resource_hash, desc, call_info);
+				&& !filter_expr_matches(*expr.children[0], resource_hash, desc, call_info, hash_matcher);
 	}
 	return false;
 }
 
-bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info, const HashMatcher *hash_matcher) const
 {
-	return filter_expr_matches(*this, resource_hash, desc, call_info);
+	return filter_expr_matches(*this, resource_hash, desc, call_info, hash_matcher);
 }
 
-bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info, const HashMatcher *hash_matcher) const
 {
-	return filter_expr_matches(*this, resource_hash, desc, call_info);
+	return filter_expr_matches(*this, resource_hash, desc, call_info, hash_matcher);
 }
 
-bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info, const HashMatcher *hash_matcher) const
 {
-	return filter_expr_matches(*this, resource_hash, desc, call_info);
+	return filter_expr_matches(*this, resource_hash, desc, call_info, hash_matcher);
 }
 
-bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info, const HashMatcher *hash_matcher) const
 {
-	return filter_expr_matches(*this, resource_hash, desc, call_info);
+	return filter_expr_matches(*this, resource_hash, desc, call_info, hash_matcher);
 }
 
-bool FilterExpr::matches(const uint64_t *resource_hash, const CustomResource *resource, const DrawCallInfo *call_info) const
+bool FilterExpr::matches(const uint64_t *resource_hash, const CustomResource *resource, const DrawCallInfo *call_info, const HashMatcher *hash_matcher) const
 {
-	return filter_expr_matches(*this, resource_hash, resource, call_info);
+	return filter_expr_matches(*this, resource_hash, resource, call_info, hash_matcher);
 }
 
 // Only the descriptor types actually used by FilterMatch are instantiated, so

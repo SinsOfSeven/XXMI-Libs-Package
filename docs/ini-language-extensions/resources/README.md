@@ -5,7 +5,8 @@
 ## Topics
 
 * [Resource Options](resource-options.md) — color space override
-* [Resource Metadata](resource-metadata.md) — resource identity and attributes such as size, stride, offset, region and spatial hashes
+* [Resource Metadata](resource-metadata.md) — resource identity, attributes, and on-demand mip, region and spatial hashes
 * [Resource Regions](resource-regions.md) — existing buffer regions and explicit regions for `copy` and `ref` operations
 * [Slot Indexing](slot-indexing.md) — dynamic slot indices and slot ranges
 * [Filters](filters.md) — declarative resource matching for command lists
+* [LOD Hashes](lod-hashes.md) — matching a Texture2D by a mip or array slice CRC, including streamed textures

@@ -72,6 +72,8 @@ struct DispatchContext
 struct MappedResourceInfo {
 	D3D11_MAPPED_SUBRESOURCE map;
 	bool mapped_writable;
+	bool mapped_discard = false;
+	bool mapped_readable = false;
 	void *orig_pData;
 	size_t size;
 	UINT bind_flags;
@@ -140,13 +142,64 @@ private:
 	HackerInputLayout* mOverrideInputLayout;
 
 	// Used for deny_cpu_read, track_texture_updates and constant buffer matching
-	typedef std::unordered_map<ID3D11Resource*, MappedResourceInfo> MappedResources;
+	struct MappedResourceKey {
+		ID3D11Resource *resource;
+		UINT subresource;
+		bool operator==(const MappedResourceKey &other) const {
+			return resource == other.resource && subresource == other.subresource;
+		}
+	};
+	struct MappedResourceKeyHash {
+		size_t operator()(const MappedResourceKey &key) const {
+			return std::hash<ID3D11Resource *>()(key.resource) ^ (size_t(key.subresource) * 0x9e3779b9u);
+		}
+	};
+	typedef std::unordered_map<MappedResourceKey, MappedResourceInfo, MappedResourceKeyHash> MappedResources;
 	MappedResources mMappedResources;
 
 	unsigned draw_number;
 	unsigned dispatch_number;
 
 	FlatHashMap<UINT, ID3D11Buffer*> mReadbackBuffers = FlatHashMap<UINT, ID3D11Buffer*>(64);
+
+	// Staging Texture2D pool for on-demand texture readback, keyed by texture
+	// shape (dimensions, mip and array counts, format) so resources of the same
+	// shape share one instead of each allocating its own. Released with the
+	// context. Texture-shaped rather than sized because a staging copy has to
+	// match the source's subresource layout exactly.
+	//
+	// Matched by comparing the description rather than by a synthetic key: a
+	// hashed key would risk two different shapes colliding and one resource being
+	// read back through another's staging texture, which would silently produce a
+	// wrong hash. The number of distinct shapes in a frame is small, so a linear
+	// scan is both safe and cheap.
+	struct StagingTexture
+	{
+		D3D11_TEXTURE2D_DESC desc;
+		ID3D11Texture2D *texture;
+	};
+	std::vector<StagingTexture> mStagingTextures;
+	// A staging texture is exclusively leased until its snapshot is consumed.
+	// Source pointers are lookup keys only after submission; readback_id protects
+	// publication against resource destruction and address reuse without keeping
+	// game resources (including swap-chain buffers) alive across frames.
+	struct TextureHashReadback {
+		ID3D11Resource *source;
+		// Used only after verifying that this alias is still registered.
+		ResourceHandleInfo *fallback_info = nullptr;
+		ID3D11Texture2D *staging;
+		D3D11_TEXTURE2D_DESC desc, hash_desc;
+		uint64_t generation, readback_id;
+		bool want_lod, want_data_hash;
+		UINT next_subresource = 0;
+		uint32_t data_hash = 0;
+		std::vector<uint32_t> crcs;
+	};
+	static const size_t MaxTextureHashReadbacks = 16;
+	std::vector<TextureHashReadback> mTextureHashReadbacks;
+	unsigned mTextureHashPollFrame = ~0u;
+	void PollTextureHashReadbacks();
+	friend void EnsureTexture2DHashes(HackerContext *, ID3D11Resource *, bool, ResourceHandleInfo *);
 
 	// These private methods are utility routines for HackerContext.
 	void BeforeDraw(DrawContext &data);
@@ -252,6 +305,7 @@ public:
 	void ResetCallCounters() { draw_number = 0; dispatch_number = 0; };
 
 	ID3D11Buffer* GetReadbackBuffer(UINT size);
+	ID3D11Texture2D* GetStagingTexture2D(const D3D11_TEXTURE2D_DESC &desc);
 
 	void DeferInputLayoutOverride(HackerInputLayout* pInputLayout);
 	void OverrideInputLayout();

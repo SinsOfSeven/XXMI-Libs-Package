@@ -1740,6 +1740,13 @@ public:
 	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override;
 };
 
+class EnsureMipHashesCommand : public CommandListCommand {
+public:
+	ResourceCopyTarget target;
+
+	void run(CommandListState*) override;
+};
+
 enum class DrawCommandType {
 	INVALID,
 	DRAW,

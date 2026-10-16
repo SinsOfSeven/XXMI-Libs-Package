@@ -43,7 +43,7 @@ $PoolFoo[$PoolBar[$id] + 1] = $PoolBar[$id] + 1 ; Nested pool variables are allo
 
 ### Reading an Unknown FIFO UID
 
-When an unassigned UID is requested for a [FIFO-indexed](indexing.md/#fifo-indexing) or [spatial](indexing.md/#spatial-indexing) pool, `pool_variable_default_value` is returned and no element is allocated:
+When an unassigned UID is requested for a [FIFO-indexed](indexing.md#fifo-indexing) or [spatial](indexing.md#spatial-indexing) pool, `pool_variable_default_value` is returned and no element is allocated:
 
 ```ini
 [PoolFooFIFO]
@@ -57,7 +57,7 @@ if $PoolFooFIFO[$object_id] == -1
 endif
 ```
 
-See [Lookup Misses](declaration.md/#lookup-misses) to change this behavior.
+See [Lookup Misses](declaration.md#lookup-misses) to change this behavior.
 
 ## Pool Variable Assignment
 
@@ -69,15 +69,15 @@ $PoolFoo[$index] = $PoolFoo[$index] + 1
 $PoolFoo[$index] = $PoolBar[$index] * $scale
 ```
 
-For `fifo` and `spatial` pools, assigning a new key allocates an element, evicting the oldest one when the pool is full. See [FIFO Indexing → Assignment](indexing.md/#assignment).
+For `fifo` and `spatial` pools, assigning a new key allocates an element, evicting the oldest one when the pool is full. See [FIFO Indexing → Assignment](indexing.md#assignment).
 
-The [`store`](../commands/README.md/#store) command writes its result to a pool variable the same way, which keeps a read-back value per object instead of in a single global:
+The [`store`](../commands/README.md#store) command writes its result to a pool variable the same way, which keeps a read-back value per object instead of in a single global:
 
 ```ini
 store = $PoolFoo[$object_id], vs-cb1, 4
 ```
 
-> Assignment to a pool variable resets the resource of the same element unless `pool_element_type_switch_reset = 0` is set. See [Element Types](declaration.md/#element-types).
+> Assignment to a pool variable resets the resource of the same element unless `pool_element_type_switch_reset = 0` is set. See [Element Types](declaration.md#element-types).
 
 ## Full Range Operations
 
@@ -100,13 +100,13 @@ Like a single assignment, this switches every element to the variable type, so w
 $PoolFoo[*] = null
 ```
 
-Resets every pool variable to `pool_variable_default_value`. Resources of the pool are left untouched, use `PoolFoo[*] = null` to reset those. See [Pool Resource Ranges](resources.md/#pool-resource-ranges).
+Resets every pool variable to `pool_variable_default_value`. Resources of the pool are left untouched, use `PoolFoo[*] = null` to reset those. See [Pool Resource Ranges](resources.md#pool-resource-ranges).
 
-> `[$first:$last]` ranges are only supported for resources, opposite a [slot range](../resources/slot-indexing.md/#slot-ranges). Variables support the full range `[*]` only.
+> `[$first:$last]` ranges are only supported for resources, opposite a [slot range](../resources/slot-indexing.md#slot-ranges). Variables support the full range `[*]` only.
 
 ## Static Pools
 
-For [static pools](indexing.md/#static-indexing), the index must be a numeric literal and the variable is resolved at parse time, so it is as cheap as a global variable:
+For [static pools](indexing.md#static-indexing), the index must be a numeric literal and the variable is resolved at parse time, so it is as cheap as a global variable:
 
 ```ini
 [PoolFooStatic]

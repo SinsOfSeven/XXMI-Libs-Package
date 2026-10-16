@@ -406,6 +406,13 @@ struct TextureOverride;
 struct TextureOverrideCandidates
 {
 	std::vector<TextureOverride>* hash_matches = nullptr;
+
+	// Sections registered under `lod_hash =`, keyed by the CRC of mip 0 rather
+	// than by the resource hash. Collects every override whose lod_hash matches
+	// any subresource of the resource, so one entry covers the whole mip chain.
+	// Null when no section uses lod_hash at all, which is the common case.
+	std::vector<TextureOverride*> lod_hash_matches;
+
 	std::vector<TextureOverride*> fuzzy_matches;
 };
 
@@ -416,12 +423,40 @@ struct ResourceHandleInfo
 	uint32_t hash = 0;
 	uint32_t orig_hash = 0;	// Original hash at the time of creation
 	uint32_t data_hash = 0;	// Just the data hash for track_texture_updates
+	bool data_hash_valid = true;
+	bool initial_data_supplied = false;
+	bool track_mips = false;
 
 	// Cleared on config reload, rebuilt on next lookup. The hash list is
 	// also rebuilt when track_texture_updates changes the hash:
 	bool texture_override_candidates_valid = false;
 	uint32_t texture_override_hash = 0;
+	// The mip cache is filled in progressively as the game streams mips in. Bumped whenever
+	// any subresource hash changes, and again on config reload, so the cached
+	// list is rebuilt at the next lookup.
+	uint32_t lod_candidate_generation = 0;
+	uint32_t texture_override_lod_generation = 0;
 	TextureOverrideCandidates texture_override_candidates;
+
+	// Set by write hooks and cleared when the requested hashes are current.
+	// A texture created with no initial data starts dirty.
+	//
+	// Selected CPU uploads can refresh this cache directly; legacy tracking can
+	// queue a readback at checktextureoverride while this is set.
+	bool texture_hashes_dirty = false;
+	bool may_have_deferred_writes = false;
+	uint64_t texture_hashes_generation = 0;
+	uint64_t texture_hashes_readback_id = 0;
+	unsigned texture_hashes_last_readback_frame = ~0u;
+	struct MipHashCache {
+		uint32_t hash = 0;
+		uint64_t generation = 0, hashed_generation = 0;
+		uint64_t deferred_generation = 0;
+		unsigned validation_frame = ~0u;
+		bool valid = false;
+	};
+	// Shared by LOD overrides, explicit mip-hash requests and Match. Indexed by D3D subresource.
+	std::vector<MipHashCache> mip_hash_cache;
 
 	// CPU-side copy of the resource data captured via hooks or staging buffer.
 	// Used to compute hashes for arbitrary regions without re-mapping
@@ -607,7 +642,44 @@ uint32_t CalcTexture3DDescHash(uint32_t initial_hash, const D3D11_TEXTURE3D_DESC
 uint32_t CalcTexture1DDataHash(const D3D11_TEXTURE1D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData);
 uint32_t CalcTexture2DDataHash(const D3D11_TEXTURE2D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData, bool zero_padding = false);
 uint32_t CalcTexture2DDataHashAccurate(const D3D11_TEXTURE2D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData);
+std::vector<uint32_t> CalcTexture2DLodHashes(const D3D11_TEXTURE2D_DESC *pDesc,
+		const D3D11_SUBRESOURCE_DATA *pInitialData);
 uint32_t CalcTexture3DDataHash(const D3D11_TEXTURE3D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData);
+
+// Marks a resource's tracked hashes (the per-subresource LOD CRCs, and the
+// resource-level data hash) as stale. Deliberately cheap: it takes the lock and
+// sets a flag, and never reads anything back or computes anything. Safe to call
+// from every write hook the game drives.
+//
+// Deferring the work to EnsureTexture2DHashes is the whole point: hashing a
+// texture is expensive and only worth doing for slots a mod actually asks about,
+// so the cheap signal is separated from the expensive response.
+void MarkTexture2DHashesDirty(ID3D11Resource *resource, UINT subresource = ~0u,
+	bool deferred_write = false);
+bool TrackTextureMipsForTexture2D(uint32_t hash, const D3D11_TEXTURE2D_DESC *desc, bool initial_data_supplied);
+bool ResourceTracksMips(ID3D11Resource *resource);
+bool Texture2DCanTrackCPUContents(const D3D11_TEXTURE2D_DESC &desc);
+void UpdateTexture2DHashesFromCPU(ID3D11Resource *resource, UINT subresource,
+	const D3D11_BOX *box, const void *data, UINT row_pitch, UINT depth_pitch);
+UINT Texture2DHashRowCount(const D3D11_TEXTURE2D_DESC &desc, UINT subresource);
+void PropagateTexture2DHashesForCopy(ID3D11Resource *dst, UINT dst_subresource,
+	UINT dst_x, UINT dst_y, UINT dst_z, ID3D11Resource *src, UINT src_subresource,
+	const D3D11_BOX *src_box);
+
+// Queues a snapshot of a checked dirty texture and polls pending snapshots once
+// per frame without waiting for the GPU. Matching uses the last completed hashes
+// until a newer snapshot is ready; a newly populated texture may match later.
+//
+// Refreshes the per-subresource LOD hashes when track_lod_hashes is on, and the
+// resource-level data hash when track_texture_updates == 1.
+void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource,
+	bool force_lod_hashes = false, ResourceHandleInfo *fallback_info = nullptr);
+// Reads only completed, current CRCs. Used by ->Match without triggering a
+// broad GPU readback; includes legacy LOD CRCs when they are current.
+std::vector<uint32_t> GetCachedTexture2DMipHashes(ID3D11Resource *resource,
+	ResourceHandleInfo *fallback_info = nullptr);
+void RegisterCustomTextureMipHashCache(ID3D11Resource *resource, ResourceHandleInfo *info);
+void UnregisterCustomTextureMipHashCache(ID3D11Resource *resource, ResourceHandleInfo *info);
 
 ResourceHandleInfo* GetResourceHandleInfo(ID3D11Resource *resource);
 uint32_t GetOrigResourceHash(ID3D11Resource *resource);
@@ -646,8 +718,6 @@ void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 
 void UpdateResourceHashFromCPU(ID3D11Resource *resource,
 	const void *data, UINT rowPitch, UINT depthPitch);
-
-void PropagateResourceHash(ID3D11Resource *dst, ID3D11Resource *src);
 
 bool MapTrackResourceHashUpdate(ID3D11Resource *pResource, UINT Subresource);
 

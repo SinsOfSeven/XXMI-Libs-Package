@@ -2187,6 +2187,10 @@ static void ParseResourceSections()
 	// Edges point at entries of the maps cleared below:
 	ClearDeferredBindFlags();
 	customResourcePools.clear();
+	for (auto &entry : customResources) {
+		if (entry.second.handle_info)
+			UnregisterCustomTextureMipHashCache(entry.second.resource, entry.second.handle_info.get());
+	}
 	customResources.clear();
 
 	IniSections::iterator lower = ini_sections.lower_bound(wstring(L"Pool"));
@@ -2975,6 +2979,7 @@ static void ParseShaderRegexSections()
 	L"match_bind_flags", \
 	L"match_cpu_access_flags", \
 	L"match_misc_flags", \
+	L"match_initial_data", \
 	L"match_byte_width", \
 	L"match_stride", \
 	L"match_mips", \
@@ -3000,6 +3005,8 @@ static void ParseShaderRegexSections()
 // function. Used by ParseCommandList to find any unrecognised lines.
 wchar_t *TextureOverrideIniKeys[] = {
 	L"hash",
+	L"lod_hash",
+	L"track_mips",
 	L"format",
 	L"width",
 	L"height",
@@ -3241,6 +3248,7 @@ static void parse_texture_override_common(const wchar_t *id, TextureOverride *ov
 
 	override->expand_region_copy = GetIniBool(id, L"expand_region_copy", false, NULL);
 	override->deny_cpu_read = GetIniBool(id, L"deny_cpu_read", false, NULL);
+	override->track_mips = GetIniBool(id, L"track_mips", false, NULL);
 
 	// Draw call context matching (shared with [Filter<Name>] sections):
 	parse_filter_numeric_field(id, L"match_first_vertex", &override->filter.FirstVertex);
@@ -3375,6 +3383,8 @@ static void parse_texture_override_fuzzy_match(const wchar_t *section)
 	parse_filter_flags_field(section, L"match_bind_flags", &filter->BindFlags, CustomResourceBindFlagNames);
 	parse_filter_flags_field(section, L"match_cpu_access_flags", &filter->CPUAccessFlags, ResourceCPUAccessFlagNames);
 	parse_filter_flags_field(section, L"match_misc_flags", &filter->MiscFlags, ResourceMiscFlagNames);
+	filter->initial_data_expected = GetIniBool(section, L"match_initial_data", false,
+		&filter->initial_data_match_set);
 
 	// Format:
 	parse_filter_format_field(section, L"match_format", &filter->Format);
@@ -3397,6 +3407,8 @@ static void parse_texture_override_fuzzy_match(const wchar_t *section)
 	}
 
 	parse_texture_override_common(section, fuzzy->texture_override, true);
+	if (fuzzy->texture_override->track_mips)
+		G->has_track_mips_overrides.store(true, std::memory_order_relaxed);
 
 	if (!G->mFuzzyTextureOverrides.insert(std::shared_ptr<FuzzyMatchResourceDesc>(fuzzy)).second) {
 		IniWarning("BUG: Unexpected error inserting fuzzy texture override\n");
@@ -3640,7 +3652,9 @@ static void ParseTextureOverrideSections()
 	const wchar_t *id;
 	TextureOverride *override;
 	uint32_t hash;
+	uint32_t lod_hash;
 	bool found;
+	bool lod_hash_found;
 	map<uint32_t, int> max_byte_width_map;
 
 	// Lock entire routine, this can be re-inited.  These shaderoverrides
@@ -3649,7 +3663,9 @@ static void ParseTextureOverrideSections()
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 
 	G->mTextureOverrideMap.clear();
+	G->has_track_mips_overrides.store(false, std::memory_order_relaxed);
 	G->mFuzzyTextureOverrides.clear();
+	G->mTextureOverrideLodMap.reset();
 	InvalidateTextureOverrideCandidates();
 
 	lower = ini_sections.lower_bound(wstring(L"TextureOverride"));
@@ -3660,36 +3676,77 @@ static void ParseTextureOverrideSections()
 
 		LogInfo("[%S]\n", id);
 
-		hash = (uint32_t)GetIniHash(id, L"Hash", 0, &found);
-		if (!found) {
-			if (texture_override_section_has_fuzzy_match_keys(id)) {
-				parse_texture_override_fuzzy_match(id);
-				continue;
-			}
+	hash = (uint32_t)GetIniHash(id, L"Hash", 0, &found);
 
-			IniWarningW(L"Section missing Hash= or valid match options\n - [%ls]\n", id);
+	// lod_hash = matches on a per-subresource CRC rather than the resource hash,
+	// so a texture that was created empty and streamed in later can still be
+	// targeted. It is a different kind of key, not a fuzzy description match, so
+	// it composes with match_* keys rather than excluding them.
+	lod_hash = (uint32_t)GetIniHash(id, L"Lod_Hash", 0, &lod_hash_found);
+	if (GetIniBool(id, L"track_mips", false, NULL) &&
+		(((!found || !hash) && !texture_override_section_has_fuzzy_match_keys(id)) || lod_hash_found))
+		IniWarningW(L"track_mips=1 requires a nonzero hash= or fuzzy match options and cannot be used with lod_hash=\n - [%ls]\n", id);
+	if (lod_hash_found && !lod_hash) {
+		IniWarningW(L"lod_hash= must not be 0 - a subresource with unknown contents is never matched\n - [%ls]\n", id);
+		lod_hash_found = false;
+	}
+
+	if (lod_hash_found)
+		G->mTextureOverrideLodMap = std::make_unique<TextureOverrideMap>();
+
+	// A section with neither key needs *some* way to identify a texture. lod_hash
+	// counts on its own here: it is a complete key in the same way hash= is, since
+	// a TextureOverride is matched against a resource's subresources rather than
+	// its description. Rejecting it because hash= is absent would make lod_hash=
+	// useless on its own, which is the normal case for a streamed texture - a
+	// mod targeting one rarely also wants to pin the resource hash.
+	if (!found && !lod_hash_found) {
+		if (texture_override_section_has_fuzzy_match_keys(id)) {
+			parse_texture_override_fuzzy_match(id);
 			continue;
 		}
 
-		if (texture_override_section_has_fuzzy_match_keys(id))
-			IniWarningW(L"Cannot use hash= and match options together!\n - [%ls]\n", id);
+		IniWarningW(L"Section missing Hash=, Lod_hash= or valid match options\n - [%ls]\n", id);
+		continue;
+	}
 
-		G->mTextureOverrideMap[hash].emplace_back(); // C++ gotcha: invalidates pointers into the vector
-		override = &G->mTextureOverrideMap[hash].back();
+	if (texture_override_section_has_fuzzy_match_keys(id))
+		IniWarningW(L"Cannot use hash= and match options together!\n - [%ls]\n", id);
+
+	if (lod_hash_found) {
+		// Both keys present would silently discard hash=, since the lod map is
+		// checked at a different point in the draw than the resource hash map. Say
+		// so rather than letting one key quietly do nothing.
+		if (found)
+			IniWarningW(L"hash= is ignored when lod_hash= is also set - the section matches on lod_hash only\n - [%ls]\n", id);
+
+		(*G->mTextureOverrideLodMap)[lod_hash].emplace_back();
+		override = &(*G->mTextureOverrideLodMap)[lod_hash].back();
 		override->ini_section = id;
 
 		// Important that we do *not* register the command lists yet:
 		parse_texture_override_common(id, override, false);
-
-		// Warn if same hash is used two or more times in sections that
-		// do not have a draw context match or match_priority:
-		warn_if_duplicate_texture_hash(override, hash);
-
-		// Record the largest `override_byte_width` value for the hash.
-		if (override->override_byte_width != -1) {
-			index_byte_width_override(override, hash, max_byte_width_map);
-		}
+		continue;
 	}
+
+	G->mTextureOverrideMap[hash].emplace_back(); // C++ gotcha: invalidates pointers into the vector
+	override = &G->mTextureOverrideMap[hash].back();
+	override->ini_section = id;
+
+	// Important that we do *not* register the command lists yet:
+	parse_texture_override_common(id, override, false);
+	if (override->track_mips && hash)
+		G->has_track_mips_overrides.store(true, std::memory_order_relaxed);
+
+	// Warn if same hash is used two or more times in sections that
+	// do not have a draw context match or match_priority:
+	warn_if_duplicate_texture_hash(override, hash);
+
+	// Record the largest `override_byte_width` value for the hash.
+	if (override->override_byte_width != -1) {
+		index_byte_width_override(override, hash, max_byte_width_map);
+	}
+}
 
 	// Apply the largest per-hash buffer size overridesto all relevant TextureOverride sections.
 	update_byte_width_overrides(max_byte_width_map);
@@ -3721,6 +3778,44 @@ static void ParseTextureOverrideSections()
 			registered_command_lists.push_back(&to.post_command_list);
 		}
 	}
+
+	if (G->mTextureOverrideLodMap) {
+		// Same sorting and command list registration as mTextureOverrideMap
+		// above - without this the lod_hash sections would be matched but their
+		// commands would never run.
+		for (auto &tolkv : *G->mTextureOverrideLodMap) {
+			std::sort(tolkv.second.begin(), tolkv.second.end(), TextureOverrideLess);
+
+			for (TextureOverride &to : tolkv.second) {
+				registered_command_lists.push_back(&to.command_list);
+				registered_command_lists.push_back(&to.post_command_list);
+			}
+		}
+	}
+
+	// Refresh per-instance CPU mip tracking for resources that were created
+	// before this config (or its previous version) was loaded. This keeps write
+	// hooks off the fuzzy-rule scan while still making reloads take effect.
+	EnterCriticalSectionPretty(&G->mResourcesLock);
+		for (auto &entry : G->mResources) {
+			ResourceHandleInfo &info = entry.second;
+			info.track_mips = false;
+			if (info.type != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+				continue;
+			auto hash_overrides = G->mTextureOverrideMap.find(info.orig_hash);
+			if (hash_overrides != G->mTextureOverrideMap.end())
+				for (const auto &to : hash_overrides->second)
+					info.track_mips |= to.track_mips;
+			for (const auto &fuzzy : G->mFuzzyTextureOverrides) {
+				const TextureOverride *to = fuzzy->texture_override;
+				if (to->track_mips && to->filter.matches_desc(&info.desc2D) &&
+					to->filter.matches_initial_data(info.initial_data_supplied)) {
+					info.track_mips = true;
+					break;
+				}
+			}
+		}
+	LeaveCriticalSection(&G->mResourcesLock);
 	LeaveCriticalSection(&G->mCriticalSection);
 }
 
@@ -4863,6 +4958,8 @@ void LoadConfigFile()
 		G->cache_resource_data |= DataCacheBindFlags::CONSTANT_BUFFER;  // TODO: Remove after a grace period.
 	}
 
+	G->track_lod_hashes = GetIniBool(L"Rendering", L"track_lod_hashes", false, NULL);
+	G->track_lod_hash_updates = GetIniBool(L"Rendering", L"track_lod_hash_updates", false, NULL);
 	G->track_implicit_index_buffers = GetIniBool(L"Rendering", L"track_implicit_index_buffers", false, NULL);
 	G->allow_buffer_resize = GetIniBool(L"Rendering", L"allow_buffer_resize", true, NULL);
 	G->assemble_signature_comments = GetIniBool(L"Rendering", L"assemble_signature_comments", false, NULL);

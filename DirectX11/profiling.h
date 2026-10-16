@@ -66,6 +66,7 @@ namespace Profiling {
 	extern Overhead overlay_overhead;
 	extern Overhead draw_overhead;
 	extern Overhead region_tracking_overhead;
+	extern Overhead lod_hash_tracking_overhead;
 	extern Overhead map_overhead;
 	extern Overhead hash_tracking_overhead;
 	extern Overhead stat_overhead;

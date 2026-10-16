@@ -61,7 +61,7 @@ PoolFooStatic[$i]  ; Syntax error
 
 Since the element is known when the line is parsed, it is accessed directly with no per-run index evaluation. Use a static pool when the indices are fixed and the pool is accessed in hot command lists.
 
-> [Full range operations](variables.md/#full-range-operations) and [pool ranges](../resources/slot-indexing.md/#pool-ranges) accept expressions on static pools, since they do not resolve a single element.
+> [Full range operations](variables.md#full-range-operations) and [pool ranges](../resources/slot-indexing.md#pool-ranges) accept expressions on static pools, since they do not resolve a single element.
 
 ## FIFO indexing
 
@@ -84,7 +84,7 @@ When new UID is accessed:
 1. If UID is found, returns previously assigned element.
 2. If UID is not found, returns default element value (for resource, it's resource template, for variable, it's `pool_variable_default_value`).
 
-A read of an unknown UID does not allocate an element unless `pool_allocate_slot_on_missing = 1` is set. See [Lookup Misses](declaration.md/#lookup-misses) for details.
+A read of an unknown UID does not allocate an element unless `pool_allocate_slot_on_missing = 1` is set. See [Lookup Misses](declaration.md#lookup-misses) for details.
 
 ### Assignment
 
@@ -136,7 +136,7 @@ UID `1.0` is no longer mapped.
 
 Spatial indexing is a FIFO map keyed by world position. It is meant for tracking objects that have no stable identifier but move only a little between frames.
 
-The value inside brackets must be a **spatial hash**: a world position quantized into a 4096×256×4096 grid of cells (X, Y, Z) and packed into a single value. Spatial hashes are produced by the [`->SpatialHash(...)`](../resources/resource-metadata.md/#spatialhashx-y-z-cell_size) resource attribute:
+The value inside brackets must be a **spatial hash**: a world position quantized into a 4096×256×4096 grid of cells (X, Y, Z) and packed into a single value. Spatial hashes are produced by the [`->SpatialHash(...)`](../resources/resource-metadata.md#spatialhashx-y-z-cell_size) resource attribute:
 
 ```ini
 $hash = vs-cb1->SpatialHash($x, $y, $z, $cell_size)
@@ -164,4 +164,4 @@ Distance between cells is the Chebyshev distance: the largest difference along a
 | `60`  | `2` cells                 | `4` cells                 |
 | `30`  | `4` cells                 | `8` cells                 |
 
-Combine spatial indexing with [element expiration](declaration.md/#element-expiration) to free up elements of objects that left the scene.
+Combine spatial indexing with [element expiration](declaration.md#element-expiration) to free up elements of objects that left the scene.

@@ -236,6 +236,54 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *re
 		if (orig_hash != hash)
 			fprintf(frame_analysis_log, " orig_hash=%08x", orig_hash);
 
+		// Report the per-subresource state, so a texture that was created empty
+		// and streamed in later can be identified and written up as a lod_hash=
+		// section without catching each mip in a separate analysis run.
+		//
+		// MipLevels is what the description claims, and populated is how many
+		// subresources actually have contents. The gap between them is the
+		// confusing part in practice: a texture routinely advertises 11 mips
+		// while holding data for one, and the description alone looks like a full
+		// chain. Dimensions are included so a capture shows the resolution of
+		// each mip that is really there.
+		const ResourceHandleInfo &resource_info = G->mResources.at(resource);
+		const auto &mip_hashes = resource_info.mip_hash_cache;
+		if (!mip_hashes.empty()) {
+			size_t populated = 0;
+			for (const auto &mip : mip_hashes) {
+				if (mip.valid && mip.hashed_generation == mip.generation &&
+					(!resource_info.may_have_deferred_writes ||
+						mip.deferred_generation == G->mip_hash_deferred_generation))
+					populated++;
+			}
+
+			fprintf(frame_analysis_log, " mip_levels=%u populated=%zu",
+					max(resource_info.desc2D.MipLevels, 1u), populated);
+			if (max(resource_info.desc2D.ArraySize, 1u) > 1)
+				fprintf(frame_analysis_log, " array=%u", resource_info.desc2D.ArraySize);
+
+			// List the subresources that actually have contents, as
+			// `hash@subresource`. Zero entries are left out rather than printed as
+			// dashes: an empty or partially streamed texture would otherwise add one
+			// entry per mip per array slice and bury the rest of the dump.
+			// Dimensions are left out as well - they follow from the base size and
+			// mip, and made these lines far longer than the other dumps.
+			//
+			// The subresource index counts array slices as well as mips, so the
+			// mip within a slice is index % MipLevels.
+			bool first = true;
+			for (UINT i = 0; i < mip_hashes.size(); i++) {
+				if (!mip_hashes[i].valid || mip_hashes[i].hashed_generation != mip_hashes[i].generation ||
+					(resource_info.may_have_deferred_writes &&
+						mip_hashes[i].deferred_generation != G->mip_hash_deferred_generation))
+					continue;
+				fprintf(frame_analysis_log, first ? " lod=[%08x@%u" : " %08x@%u", mip_hashes[i].hash, i);
+				first = false;
+			}
+			if (!first)
+				fprintf(frame_analysis_log, "]");
+		}
+
 		info = &G->mResourceInfo.at(orig_hash);
 		if (info->hash_contaminated) {
 			fprintf(frame_analysis_log, " hash_contamination=");

@@ -64,9 +64,9 @@ Slot bounds are validated at runtime: `$first` must not be negative, `$last` mus
 
 `PoolFoo[$first:$last]` selects pool elements `$first` through `$last`, inclusive.
 
-Pool bounds follow [Ring indexing](../pools/indexing.md/#ring-indexing) rules, so negative and overflowing indices wrap around the pool size. The range may not be larger than the pool.
+Pool bounds follow [Ring indexing](../pools/indexing.md#ring-indexing) rules, so negative and overflowing indices wrap around the pool size. The range may not be larger than the pool.
 
-This holds for every index type: on a `fifo` or `spatial` pool the bounds are still element indices, not keys, so the range addresses the physical elements directly and bypasses key lookup. Element keys are not touched by a range operation. A fetch counts as an update of the elements it writes for [expiration](../pools/declaration.md/#element-expiration) purposes, like any assignment.
+This holds for every index type: on a `fifo` or `spatial` pool the bounds are still element indices, not keys, so the range addresses the physical elements directly and bypasses key lookup. Element keys are not touched by a range operation. A fetch counts as an update of the elements it writes for [expiration](../pools/declaration.md#element-expiration) purposes, like any assignment.
 
 A pool range is only valid on the other side of a slot range. Each side states its own bounds, so that a range is visible in the line without reading the other side of the assignment, and the two ranges must have the same size.
 
@@ -74,7 +74,7 @@ A pool range is only valid on the other side of a slot range. Each side states i
 
 Slot ranges accept the same copy types and options as a single-slot copy, such as `copy`, `unless_null`, `no_view_cache`, `raw` or `resolve_msaa`.
 
-* `unless_null` — slots whose source is `null` keep their current binding, and pool elements whose source slot is empty are left untouched, including their [expiration](../pools/declaration.md/#element-expiration): a skipped element does not count as updated.
+* `unless_null` — slots whose source is `null` keep their current binding, and pool elements whose source slot is empty are left untouched, including their [expiration](../pools/declaration.md#element-expiration): a skipped element does not count as updated.
 * `no_view_cache` — views created for the range are released after each run instead of being cached per slot.
 
 A plain `ref` (optionally with `unless_null` and `no_view_cache`) is the fast path: the range only resolves views and issues one bind or fetch call. When a pool element already holds a view of the slot's type, for example because it was fetched from a slot of the same type, that view is bound directly instead of creating a new one.

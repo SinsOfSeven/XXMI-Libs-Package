@@ -1,6 +1,6 @@
 # Slot Range Capture
 
-A mod shares its shaders with the rest of the game, so a texture slot it overrides for one draw call stays overridden for every later draw that reaches the same shader. The usual fix is to capture the game's bindings before the override and put them back after the draw, with one line per slot: [ZZMI's SlotFix](https://github.com/leotorrez/ZZMI-Package/tree/main/ZZMI/Core/ZZMI/Libraries/SlotFix) spends 38 lines capturing and restoring `ps-t0` to `ps-t18` that way. With [slot ranges](../resources/slot-indexing.md/#slot-ranges) each direction is one operation, whatever the slot count.
+A mod shares its shaders with the rest of the game, so a texture slot it overrides for one draw call stays overridden for every later draw that reaches the same shader. The usual fix is to capture the game's bindings before the override and put them back after the draw, with one line per slot: [ZZMI's SlotFix](https://github.com/leotorrez/ZZMI-Package/tree/main/ZZMI/Core/ZZMI/Libraries/SlotFix) spends 38 lines capturing and restoring `ps-t0` to `ps-t18` that way. With [slot ranges](../resources/slot-indexing.md#slot-ranges) each direction is one operation, whatever the slot count.
 
 ```ini
 [Poolt]
@@ -47,4 +47,4 @@ if $captured
 endif
 ```
 
-> `ref` is the fast path for ranges. Adding `copy` or other options such as `raw` makes every slot go through a regular single-slot copy, and only the final bind call is shared. See [Copy Options](../resources/slot-indexing.md/#copy-options).
+> `ref` is the fast path for ranges. Adding `copy` or other options such as `raw` makes every slot go through a regular single-slot copy, and only the final bind call is shared. See [Copy Options](../resources/slot-indexing.md#copy-options).

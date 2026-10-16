@@ -6,6 +6,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <functional>
 
 #include "DrawCallInfo.h"
 
@@ -155,6 +156,10 @@ public:
 	FilterField ArraySize;           // 1D+2D
 	FilterField SampleDesc_Count;    //    2D
 	FilterField SampleDesc_Quality;  //    2D
+	// Creation argument state used by fuzzy [TextureOverride] matching. This is
+	// not part of a D3D11 resource description and is unavailable to [Filter].
+	bool initial_data_match_set = false;
+	bool initial_data_expected = false;
 
 	// Draw context fields, evaluated against the DrawCallInfo of the current
 	// command list run (e.g. match_index_count = >6):
@@ -179,6 +184,10 @@ public:
 	bool matches_desc(const D3D11_TEXTURE1D_DESC *desc) const;
 	bool matches_desc(const D3D11_TEXTURE2D_DESC *desc) const;
 	bool matches_desc(const D3D11_TEXTURE3D_DESC *desc) const;
+	bool matches_initial_data(bool supplied) const
+	{
+		return !initial_data_match_set || initial_data_expected == supplied;
+	}
 
 	void set_resource_type(D3D11_RESOURCE_DIMENSION type);
 	bool update_types_matched();
@@ -216,6 +225,7 @@ enum class FilterExprOp {
 
 class FilterExpr {
 public:
+	using HashMatcher = std::function<bool(uint64_t)>;
 	FilterExprOp op = FilterExprOp::LEAF;
 
 	// Set for LEAF, null otherwise.
@@ -241,11 +251,11 @@ public:
 	// `resource_hash` is null when no hash is available for the target (e.g. a
 	// custom resource that has not been hashed), in which case HASH leaves
 	// never match.
-	bool matches(const uint64_t *resource_hash, const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const uint64_t *resource_hash, const CustomResource *resource, const DrawCallInfo *call_info) const;
+	bool matches(const uint64_t *resource_hash, const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info, const HashMatcher *hash_matcher = nullptr) const;
+	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info, const HashMatcher *hash_matcher = nullptr) const;
+	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info, const HashMatcher *hash_matcher = nullptr) const;
+	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info, const HashMatcher *hash_matcher = nullptr) const;
+	bool matches(const uint64_t *resource_hash, const CustomResource *resource, const DrawCallInfo *call_info, const HashMatcher *hash_matcher = nullptr) const;
 };
 
 typedef std::map<std::wstring, std::shared_ptr<FilterMatch>> FilterMatches;

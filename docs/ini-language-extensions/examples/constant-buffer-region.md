@@ -18,7 +18,7 @@ run = CustomShaderSkinning
 cs-cb0 = null
 ```
 
-* [`vs-cb1->Offset`](../resources/resource-metadata.md/#offset) returns the byte offset of the region currently visible to the vertex shader, derived from the `FirstConstant` the game passed.
+* [`vs-cb1->Offset`](../resources/resource-metadata.md#offset) returns the byte offset of the region currently visible to the vertex shader, derived from the `FirstConstant` the game passed.
 * `->Region($byte_offset, $byte_size)` takes an absolute byte offset into the underlying buffer, so the visible offset is added to the local offset of the bone data.
 * `ref` binds the same D3D11 buffer with a new region, and `cs-cb0` sees the data as if the region started at register `c0`. D3D11 requires constant buffer regions to start and end on 256-byte boundaries (multiples of 16 shader constants), which `256` and `3072` satisfy.
 
@@ -35,11 +35,11 @@ $base = vs-cb1->Offset
 ResourceBones = copy vs-cb1->Region($base + 256, 3072)
 ```
 
-Only `3072` bytes are copied. `ResourceBones->Size` reports `3072` afterwards, and [`->Offset`](../resources/resource-metadata.md/#offset) of the copy is `0`.
+Only `3072` bytes are copied. `ResourceBones->Size` reports `3072` afterwards, and [`->Offset`](../resources/resource-metadata.md#offset) of the copy is `0`.
 
 ## Checking the Window Size
 
-Some games bind the whole buffer for small objects and a window for large ones. [`->Size`](../resources/resource-metadata.md/#size) of the slot reports the size of the visible region, so the script can tell them apart before picking offsets:
+Some games bind the whole buffer for small objects and a window for large ones. [`->Size`](../resources/resource-metadata.md#size) of the slot reports the size of the visible region, so the script can tell them apart before picking offsets:
 
 ```ini
 if vs-cb1->Size == 4096

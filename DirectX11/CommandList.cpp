@@ -715,6 +715,26 @@ static bool ParseCheckTextureOverride(const wchar_t *section,
 	return false;
 }
 
+static bool ParseEnsureMipHashes(const wchar_t *section,
+		const wchar_t *key, wstring *val,
+		CommandList *explicit_command_list,
+		CommandList *pre_command_list,
+		CommandList *post_command_list,
+		const wstring *ini_namespace)
+{
+	EnsureMipHashesCommand *operation = new EnsureMipHashesCommand();
+	if (operation->target.ParseTarget(val->c_str(), true, ini_namespace, pre_command_list->scope,
+			true, true)) {
+		// The request needs invalidation tracking even when no global LOD option
+		// is enabled. Hashing remains on demand at the explicit request.
+		G->track_mip_hashes = true;
+		return AddCommandToList(operation, explicit_command_list, NULL,
+				pre_command_list, post_command_list, section, key, val);
+	}
+	delete operation;
+	return false;
+}
+
 static bool ParseResetPerFrameLimits(const wchar_t *section,
 		const wchar_t *key, wstring *val,
 		CommandList *explicit_command_list,
@@ -1283,6 +1303,9 @@ bool ParseCommandListGeneralCommands(const wchar_t *section,
 	if (!wcscmp(key, L"checktextureoverride"))
 		return ParseCheckTextureOverride(section, key, val, explicit_command_list, pre_command_list, post_command_list, ini_namespace);
 
+	if (!wcscmp(key, L"ensuremiphashes"))
+		return ParseEnsureMipHashes(section, key, val, explicit_command_list, pre_command_list, post_command_list, ini_namespace);
+
 	if (!wcscmp(key, L"run")) {
 		if (!wcsncmp(val->c_str(), L"customshader", 12) || !wcsncmp(val->c_str(), L"builtincustomshader", 19))
 			return ParseRunShader(section, key, val, explicit_command_list, pre_command_list, post_command_list, ini_namespace);
@@ -1345,6 +1368,42 @@ bool ParseCommandListGeneralCommands(const wchar_t *section,
 
 static std::string slot_log_name(const ResourceCopyTarget &target, unsigned slot);
 static CustomResource* pool_element(CustomResourcePool *pool, int pool_first, unsigned index, bool is_assignment);
+
+void EnsureMipHashesCommand::run(CommandListState *state)
+{
+	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
+	int first = (int)target.slot;
+	unsigned count = 1;
+	if (target.IsRange() && !target.ResolveRange(state, &first, &count))
+		return;
+	unsigned original_slot = target.slot;
+	for (unsigned i = 0; i < count; ++i) {
+		if (target.IsRange())
+			target.slot = (unsigned)first + i;
+		ID3D11View *view = nullptr;
+		ID3D11Resource *resource = target.GetResource(state, &view, nullptr, nullptr, nullptr, nullptr);
+		if (resource) {
+			ResourceHandleInfo *fallback_info = nullptr;
+			if (target.type == ResourceCopyTargetType::CUSTOM_RESOURCE) {
+				D3D11_RESOURCE_DIMENSION dimension;
+				resource->GetType(&dimension);
+				CustomResource *custom_resource = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D
+					? target.GetCustomResource(state) : nullptr;
+				if (custom_resource) {
+					if (!custom_resource->handle_info)
+						custom_resource->handle_info = std::make_unique<ResourceHandleInfo>();
+					fallback_info = custom_resource->handle_info.get();
+					RegisterCustomTextureMipHashCache(resource, fallback_info);
+				}
+			}
+			EnsureTexture2DHashes(state->mHackerContext, resource, true, fallback_info);
+			resource->Release();
+		}
+		if (view)
+			view->Release();
+	}
+	target.slot = original_slot;
+}
 
 void CheckTextureOverrideCommand::run(CommandListState *state)
 {
@@ -3175,7 +3234,6 @@ float CommandListOperand::process_texture_filter(CommandListState *state)
 
 		case ResourceCopyTargetEvaluationMode::RESOURCE_SPATIAL_HASH:
 			return texture_filter_target.GetResourceSpatialHash(state);
-			
 		case ResourceCopyTargetEvaluationMode::RESOURCE_SOURCE_STRIDE:
 		{
 			CustomResource* custom_resource = texture_filter_target.GetCustomResource(state);
@@ -6875,6 +6933,10 @@ void CustomResource::OverrideOutOfBandInfo(DXGI_FORMAT *format, UINT *stride)
 
 void CustomResource::ResetRuntimeState()
 {
+	if (handle_info)
+		UnregisterCustomTextureMipHashCache(resource, handle_info.get());
+	if (handle_info)
+		handle_info->mip_hash_cache.clear();
 	if (resource) {
 		resource->Release();
 		resource = nullptr;
@@ -8412,7 +8474,6 @@ IniParserResult ResourceCopyTarget::ParseTargetMember(
 	};
 
 	IniParserResult ret = SyntaxTarget::ParseTargetMember(members, target, length, temp_target, evaluation_mode, ini_namespace, scope);
-
 	if (ret == IniParserResult::TOKEN_FOUND
 			&& evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE_FILTER)
 	{
@@ -10420,6 +10481,10 @@ void ResourceCopyTarget::SetResource(
 		}
 
 		if (custom_resource->resource != res) {
+			if (custom_resource->handle_info)
+				UnregisterCustomTextureMipHashCache(custom_resource->resource, custom_resource->handle_info.get());
+			if (custom_resource->handle_info)
+				custom_resource->handle_info->mip_hash_cache.clear();
 			if (custom_resource->resource)
 				custom_resource->resource->Release();
 			custom_resource->resource = res;
@@ -10537,6 +10602,20 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 
 	if (!resource)
 		return;
+
+	// On-demand hashing.
+	//
+	// A texture the game streamed in or wrote to has its tracked hashes marked
+	// stale at the time of the write, not hashed then - hashing means a GPU
+	// readback, and there is no point paying for textures no mod ever asks about.
+	// This is the point where that deferred work happens: it refreshes the
+	// resource hash and the per-subresource LOD hashes, and does nothing at all
+	// once the resource is already current.
+	//
+	// Deliberately before the matching below, which reads both the resource hash
+	// and the LOD hashes. A no-op for anything that is not a Texture2D.
+	if (G->track_lod_hashes || G->track_lod_hash_updates || G->track_texture_updates == 1)
+		EnsureTexture2DHashes(state->mHackerContext, resource);
 
 	// For vertex and index buffers the game may pack multiple meshes into
 	// one buffer and bind them at different offsets. In that case the base
@@ -11389,11 +11468,34 @@ float ResourceCopyTarget::EvaluateResourceFilter(CommandListState* state)
 		if (!custom_resource)
 			return -0.0f;
 
-		// TODO(shader filters): custom resources are not content-hashed yet, so
-		// pass no hash and let hash literals never match. Hashing them on the
-		// fly (or caching a hash on the CustomResource) would let
-		// `ResourceFoo->Match(<hash>)` work.
-		return filter->matches(nullptr, custom_resource, state->call_info) ? 1.0f : 0.0f;
+		if (!filter->has_hash)
+			return filter->matches(nullptr, custom_resource, state->call_info) ? 1.0f : 0.0f;
+
+		// Resolve the D3D resource only when evaluation reaches a hash leaf.
+		// A matching description leaf can short-circuit an OR expression.
+		ID3D11View *view = nullptr;
+		ID3D11Resource *resource = nullptr;
+		uint64_t resource_hash = 0;
+		std::vector<uint32_t> mip_hashes;
+		bool resolved = false;
+		FilterExpr::HashMatcher match_hash = [&](uint64_t value) {
+			if (!resolved) {
+				resolved = true;
+				resource = GetResource(state, &view, nullptr, nullptr, nullptr, nullptr, nullptr);
+				if (resource) {
+					resource_hash = GetResourceHashSafe(resource);
+					mip_hashes = GetCachedTexture2DMipHashes(resource, custom_resource->handle_info.get());
+				}
+			}
+			return resource && ((resource_hash && value == resource_hash) ||
+				(value <= UINT32_MAX && std::find(mip_hashes.begin(), mip_hashes.end(), (uint32_t)value) != mip_hashes.end()));
+		};
+		bool matched = filter->matches(nullptr, custom_resource, state->call_info, &match_hash);
+		if (view)
+			view->Release();
+		if (resource)
+			resource->Release();
+		return matched ? 1.0f : 0.0f;
 	}
 
 	ID3D11View* view = nullptr;
@@ -11416,30 +11518,41 @@ float ResourceCopyTarget::EvaluateResourceFilter(CommandListState* state)
 
 	D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
 	resource->GetType(&dimension);
+	std::vector<uint32_t> mip_hashes;
+	FilterExpr::HashMatcher match_hash;
+	if (filter->has_hash) {
+		if (dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+			mip_hashes = GetCachedTexture2DMipHashes(resource);
+		match_hash = [resource_hash, &mip_hashes](uint64_t value) {
+			return value == resource_hash ||
+				(value <= UINT32_MAX && std::find(mip_hashes.begin(), mip_hashes.end(), (uint32_t)value) != mip_hashes.end());
+		};
+	}
+	const auto hash_matcher = filter->has_hash ? &match_hash : nullptr;
 
 	switch (dimension) {
 		case D3D11_RESOURCE_DIMENSION_BUFFER: {
 			D3D11_BUFFER_DESC desc;
 			static_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
-			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info, hash_matcher);
 			break;
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
 			D3D11_TEXTURE1D_DESC desc;
 			static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
-			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info, hash_matcher);
 			break;
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
 			D3D11_TEXTURE2D_DESC desc;
 			static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
-			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info, hash_matcher);
 			break;
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
 			D3D11_TEXTURE3D_DESC desc;
 			static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
-			matched = filter->matches(resource_hash_ptr, &desc, state->call_info);
+			matched = filter->matches(resource_hash_ptr, &desc, state->call_info, hash_matcher);
 			break;
 		}
 	}
@@ -12976,6 +13089,10 @@ void ResourceCopyOperation::CopyResourceToResource(
 				dst_custom_resource->SetHandleInfo(src_resource, 0, buf_dst_size);
 			state->mOrigContext1->CopyResource(dst_resource, src_resource);
 		}
+		if ((G->track_mip_hashes || ResourceTracksMips(dst_resource)) &&
+			!(options & ResourceCopyOptions::COPY_DESC))
+			MarkTexture2DHashesDirty(dst_resource, ~0u,
+				state->mOrigContext1->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
 	} else {
 		COMMAND_LIST_LOG(state, "  copying by reference\n");
 		Profiling::resource_reference_copies++;

@@ -1,4 +1,5 @@
 #include "ResourceHash.h"
+#include <atomic>
 
 #include <INITGUID.h>
 #include "log.h"
@@ -615,7 +616,7 @@ static size_t Texture3DLength(
 }
 
 static uint32_t hash_tex2d_data(uint32_t hash, const void *data, size_t length,
-		const D3D11_TEXTURE2D_DESC *pDesc, bool zero_padding,
+		const D3D11_TEXTURE2D_DESC *pDesc, UINT level, bool zero_padding,
 		bool skip_padding, UINT mapped_row_pitch)
 {
 	size_t row_pitch, slice_pitch, row_count;
@@ -653,7 +654,13 @@ static uint32_t hash_tex2d_data(uint32_t hash, const void *data, size_t length,
 	if (!zero_padding && !skip_padding)
 		return crc32c_hw(hash, data, length);
 
-	DirectX::LoaderHelpers::GetSurfaceInfo(pDesc->Width, pDesc->Height, pDesc->Format, &slice_pitch, &row_pitch, &row_count);
+	// The row geometry comes from this mip level's dimensions, not the base
+	// level's, so that hashing a subresource other than level 0 walks the same
+	// rows the game actually wrote. Level 0 reduces to the base dimensions, so
+	// existing hashes are unchanged.
+	UINT mip_width = max(pDesc->Width >> level, 1);
+	UINT mip_height = max(pDesc->Height >> level, 1);
+	DirectX::LoaderHelpers::GetSurfaceInfo(mip_width, mip_height, pDesc->Format, &slice_pitch, &row_pitch, &row_count);
 
 	uint8_t *sptr = (uint8_t*)data;
 	size_t msize = min(row_pitch, mapped_row_pitch);
@@ -727,7 +734,7 @@ uint32_t CalcTexture2DDataHash(
 			LogDebug("  Using 3DMigoto v1.2.1 compatible Texture2D CRC calculation\n");
 		}
 		return hash_tex2d_data(hash, pInitialData[0].pSysMem, length_v12,
-				pDesc, zero_padding, false, pInitialData[0].SysMemPitch);
+				pDesc, 0, zero_padding, false, pInitialData[0].SysMemPitch);
 	}
 
 	// If we are here it means the old length had overflowed the buffer,
@@ -773,7 +780,7 @@ uint32_t CalcTexture2DDataHash(
 
 	length = Texture2DLength(pDesc, &pInitialData[0], 0);
 	hash = hash_tex2d_data(hash, pInitialData[0].pSysMem, length,
-			pDesc, false, true, pInitialData[0].SysMemPitch);
+			pDesc, 0, false, true, pInitialData[0].SysMemPitch);
 
 	return hash;
 }
@@ -803,9 +810,683 @@ uint32_t CalcTexture2DDataHashAccurate(
 	// Passing length=INT_MAX, since that is an upper bound and
 	// hash_tex2d_data will work it out from DirectXTK
 	hash = hash_tex2d_data(hash, pInitialData[0].pSysMem, INT_MAX,
-			pDesc, false, true, pInitialData[0].SysMemPitch);
+			pDesc, 0, false, true, pInitialData[0].SysMemPitch);
 
 	return hash;
+}
+
+// Per-subresource CRCs, for associating a mip with its sibling mips without
+// doing any image processing.
+//
+// The regular texture hash only ever covers subresource 0 - see the comment in
+// CalcTexture2DDataHash for why folding the rest of the chain into that hash is
+// not something we can do. These hashes are therefore purely additive: they are
+// recorded alongside hash/data_hash, which are untouched, so every existing
+// TextureOverride keeps matching exactly as it did before. All the game gives us
+// at creation is pInitialData, which already contains every subresource of every
+// array slice with its own SysMemPitch, so this costs one extra CRC per subresource
+// and no readback.
+
+// Number of entries a LOD hash vector needs to cover every subresource.
+static UINT Texture2DSubresourceCount(const D3D11_TEXTURE2D_DESC *pDesc)
+{
+	return max(pDesc->MipLevels, 1) * max(pDesc->ArraySize, 1);
+}
+
+// CRCs one subresource from a pitched source buffer. Used for whole subresource
+// updates, where the row pitch comes from the caller rather than from a
+// D3D11_SUBRESOURCE_DATA, so the compression case has to be derived from the
+// format instead.
+static uint32_t CalcSubresourceHash(const D3D11_TEXTURE2D_DESC *pDesc, UINT mip,
+		const void *data, UINT row_pitch)
+{
+	UINT mip_width = max(pDesc->Width >> mip, 1);
+	UINT mip_height = max(pDesc->Height >> mip, 1);
+	UINT block_size = CompressedFormatBlockSize(pDesc->Format);
+
+	if (block_size) {
+		// A compressed row contains 4x4 blocks, but the source can still
+		// have padding between block rows (especially a mapped staging mip).
+		const size_t row_bytes = ((mip_width + 3) / 4) * block_size;
+		const UINT rows = (mip_height + 3) / 4;
+		if (row_pitch < row_bytes)
+			return 0;
+		uint32_t crc = 0;
+		for (UINT row = 0; row < rows; ++row)
+			crc = crc32c_hw(crc, static_cast<const uint8_t *>(data) + row * row_pitch, row_bytes);
+		return crc;
+	}
+
+	// Uncompressed: walk the rows and skip the pitch padding, matching the
+	// 1.2.11+ path so a subresource is hashed the same way the main hash hashes
+	// subresource 0.
+	return hash_tex2d_data(0, data, (size_t)row_pitch * mip_height, pDesc, mip,
+			false, true, row_pitch);
+}
+
+// Returns a LOD hash per subresource of the texture about to be created, indexed
+// by D3D11CalcSubresource. An entry is 0 when that subresource had no initial
+// data, which is normal: many textures are created empty and streamed in later,
+// and the on-demand path fills those entries in when a slot is checked.
+std::vector<uint32_t> CalcTexture2DLodHashes(const D3D11_TEXTURE2D_DESC *pDesc,
+		const D3D11_SUBRESOURCE_DATA *pInitialData)
+{
+	std::vector<uint32_t> hashes;
+	UINT mip_levels, array_size, mip, slice;
+
+	if (!pDesc)
+		return hashes;
+
+	mip_levels = max(pDesc->MipLevels, 1);
+	array_size = max(pDesc->ArraySize, 1);
+
+	hashes.assign(Texture2DSubresourceCount(pDesc), 0);
+	if (!pInitialData)
+		return hashes;
+
+	for (mip = 0; mip < mip_levels; mip++) {
+		for (slice = 0; slice < array_size; slice++) {
+			UINT subresource = D3D11CalcSubresource(mip, slice, mip_levels);
+			const D3D11_SUBRESOURCE_DATA *sub = &pInitialData[subresource];
+			if (!sub->pSysMem)
+				continue;
+			hashes[subresource] = CalcSubresourceHash(pDesc, mip, sub->pSysMem, sub->SysMemPitch);
+		}
+	}
+
+	return hashes;
+}
+
+UINT Texture2DHashRowCount(const D3D11_TEXTURE2D_DESC &desc, UINT subresource)
+{
+	const UINT mip = subresource % max(desc.MipLevels, 1u);
+	const UINT height = max(desc.Height >> mip, 1u);
+	return CompressedFormatBlockSize(desc.Format) ? (height + 3) / 4 : height;
+}
+
+bool TrackTextureMipsForTexture2D(uint32_t hash, const D3D11_TEXTURE2D_DESC *desc,
+	bool initial_data_supplied)
+{
+	if (!desc || !G->has_track_mips_overrides.load(std::memory_order_relaxed))
+		return false;
+	bool track = false;
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+		if (hash) {
+			auto it = G->mTextureOverrideMap.find(hash);
+			if (it != G->mTextureOverrideMap.end())
+				for (const auto &override : it->second)
+					track |= override.track_mips;
+		}
+		for (const auto &fuzzy : G->mFuzzyTextureOverrides) {
+			const TextureOverride *override = fuzzy->texture_override;
+			if (override->track_mips &&
+				override->filter.matches_desc(desc) &&
+				override->filter.matches_initial_data(initial_data_supplied))
+				track = true;
+		}
+	LeaveCriticalSection(&G->mCriticalSection);
+	return track;
+}
+
+bool ResourceTracksMips(ID3D11Resource *resource)
+{
+	if (!resource || !G->has_track_mips_overrides.load(std::memory_order_relaxed))
+		return false;
+	auto info = GetResourceHandleInfo(resource);
+	return info && info->track_mips;
+}
+
+bool Texture2DCanTrackCPUContents(const D3D11_TEXTURE2D_DESC &desc)
+{
+	return !(desc.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL |
+		D3D11_BIND_UNORDERED_ACCESS)) &&
+		!(desc.MiscFlags & (D3D11_RESOURCE_MISC_SHARED |
+			D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX | D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+			D3D11_RESOURCE_MISC_GENERATE_MIPS));
+}
+
+void UpdateTexture2DHashesFromCPU(ID3D11Resource *resource, UINT subresource,
+	const D3D11_BOX *box, const void *data, UINT row_pitch, UINT depth_pitch)
+{
+	if (!resource || !data || !G->has_track_mips_overrides.load(std::memory_order_relaxed))
+		return;
+	D3D11_RESOURCE_DIMENSION dimension;
+	resource->GetType(&dimension);
+	if (dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+		return;
+	D3D11_TEXTURE2D_DESC desc;
+	static_cast<ID3D11Texture2D *>(resource)->GetDesc(&desc);
+	if (!Texture2DCanTrackCPUContents(desc))
+		return;
+	const UINT mips = max(desc.MipLevels, 1u);
+	if (subresource >= mips * desc.ArraySize)
+		return;
+	const UINT mip_level = subresource % mips;
+	const UINT width = max(desc.Width >> mip_level, 1u);
+	const UINT height = max(desc.Height >> mip_level, 1u);
+	if (box && (box->left || box->top || box->front ||
+		box->right != width || box->bottom != height || box->back != 1))
+		return;
+	uint32_t creation_hash = 0;
+	bool track_mips = false;
+	uint64_t generation = 0;
+	D3D11_TEXTURE2D_DESC hash_desc = {};
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+		if (auto info = GetResourceHandleInfo(resource)) {
+			creation_hash = info->orig_hash;
+			track_mips = info->track_mips;
+			generation = info->texture_hashes_generation;
+			hash_desc = info->desc2D;
+		}
+	LeaveCriticalSection(&G->mCriticalSection);
+	if (!track_mips)
+		return;
+	Profiling::State profiling_state;
+	const bool profiling = Profiling::mode == Profiling::Mode::SUMMARY;
+	if (profiling)
+		Profiling::start(&profiling_state);
+	const uint32_t crc = CalcSubresourceHash(&desc, mip_level, data, row_pitch);
+	D3D11_SUBRESOURCE_DATA initial_data = {data, row_pitch, depth_pitch};
+	const uint32_t data_hash = subresource == 0 && G->track_texture_updates == 1 ?
+		CalcTexture2DDataHash(&hash_desc, &initial_data) : 0;
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	EnterCriticalSectionPretty(&G->mResourcesLock);
+		if (auto info = GetResourceHandleInfo(resource)) {
+			if (info->orig_hash == creation_hash && info->texture_hashes_generation == generation) {
+				if (info->mip_hash_cache.size() < mips * desc.ArraySize)
+					info->mip_hash_cache.resize(mips * desc.ArraySize);
+				auto &entry = info->mip_hash_cache[subresource];
+				entry.hash = crc;
+				entry.hashed_generation = entry.generation;
+				entry.valid = true;
+				entry.deferred_generation = G->mip_hash_deferred_generation;
+				entry.validation_frame = G->frame_no;
+				info->lod_candidate_generation++;
+				if (subresource == 0 && G->track_texture_updates == 1) {
+					info->data_hash = data_hash;
+					info->hash = CalcTexture2DDescHash(info->data_hash, &info->desc2D);
+					info->data_hash_valid = true;
+				}
+				info->texture_hashes_dirty = false;
+				for (const auto &mip : info->mip_hash_cache)
+					if (!mip.valid || mip.hashed_generation != mip.generation)
+						info->texture_hashes_dirty = true;
+				if (G->track_texture_updates == 1 && !info->data_hash_valid)
+					info->texture_hashes_dirty = true;
+			}
+		}
+	LeaveCriticalSection(&G->mResourcesLock);
+	LeaveCriticalSection(&G->mCriticalSection);
+	if (profiling)
+		Profiling::end(&profiling_state, &Profiling::lod_hash_tracking_overhead);
+}
+
+void PropagateTexture2DHashesForCopy(ID3D11Resource *dst, UINT dst_subresource,
+	UINT dst_x, UINT dst_y, UINT dst_z, ID3D11Resource *src, UINT src_subresource,
+	const D3D11_BOX *src_box)
+{
+	if (!dst || !src || (!G->has_track_mips_overrides.load(std::memory_order_relaxed) &&
+		!G->track_lod_hashes && !G->track_lod_hash_updates && !G->track_mip_hashes &&
+		G->track_texture_updates != 1))
+		return;
+	D3D11_RESOURCE_DIMENSION dst_dim, src_dim;
+	dst->GetType(&dst_dim);
+	src->GetType(&src_dim);
+	if (dst_dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D || src_dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+		return;
+	D3D11_TEXTURE2D_DESC dst_desc, src_desc;
+	static_cast<ID3D11Texture2D *>(dst)->GetDesc(&dst_desc);
+	static_cast<ID3D11Texture2D *>(src)->GetDesc(&src_desc);
+	if (!Texture2DCanTrackCPUContents(dst_desc) || !Texture2DCanTrackCPUContents(src_desc))
+		return;
+	const UINT dst_mips = max(dst_desc.MipLevels, 1u);
+	const UINT src_mips = max(src_desc.MipLevels, 1u);
+	if (dst_subresource >= dst_mips * dst_desc.ArraySize ||
+		src_subresource >= src_mips * src_desc.ArraySize || dst_x || dst_y || dst_z)
+		return;
+	const UINT dst_width = max(dst_desc.Width >> (dst_subresource % dst_mips), 1u);
+	const UINT dst_height = max(dst_desc.Height >> (dst_subresource % dst_mips), 1u);
+	const UINT src_width = max(src_desc.Width >> (src_subresource % src_mips), 1u);
+	const UINT src_height = max(src_desc.Height >> (src_subresource % src_mips), 1u);
+	if (dst_desc.SampleDesc.Count != 1 || src_desc.SampleDesc.Count != 1 ||
+		dst_width != src_width || dst_height != src_height ||
+		(dst_desc.Format != src_desc.Format) ||
+		(src_box && (src_box->left || src_box->top || src_box->front ||
+			src_box->right != src_width || src_box->bottom != src_height || src_box->back != 1)))
+		return;
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	EnterCriticalSectionPretty(&G->mResourcesLock);
+		auto dst_info = GetResourceHandleInfo(dst);
+		auto src_info = GetResourceHandleInfo(src);
+		if (dst_info && src_info && src_subresource < src_info->mip_hash_cache.size() &&
+			(dst_info->track_mips || !dst_info->mip_hash_cache.empty())) {
+			const auto &source = src_info->mip_hash_cache[src_subresource];
+			if (source.valid && source.hashed_generation == source.generation) {
+				if (dst_info->mip_hash_cache.size() < dst_mips * dst_desc.ArraySize)
+					dst_info->mip_hash_cache.resize(dst_mips * dst_desc.ArraySize);
+				auto &target = dst_info->mip_hash_cache[dst_subresource];
+				target.hash = source.hash;
+				target.hashed_generation = target.generation;
+				target.valid = true;
+				target.deferred_generation = G->mip_hash_deferred_generation;
+				target.validation_frame = G->frame_no;
+				dst_info->lod_candidate_generation++;
+				if (dst_subresource == 0 && src_subresource == 0 &&
+					G->track_texture_updates == 1 && src_info->data_hash_valid) {
+					dst_info->data_hash = src_info->data_hash;
+					dst_info->hash = CalcTexture2DDescHash(dst_info->data_hash, &dst_info->desc2D);
+					dst_info->data_hash_valid = true;
+				}
+				dst_info->texture_hashes_dirty = false;
+				for (const auto &mip : dst_info->mip_hash_cache)
+					if (!mip.valid || mip.hashed_generation != mip.generation)
+						dst_info->texture_hashes_dirty = true;
+				if (G->track_texture_updates == 1 && !dst_info->data_hash_valid)
+					dst_info->texture_hashes_dirty = true;
+			}
+		}
+	LeaveCriticalSection(&G->mResourcesLock);
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+
+// Marks a texture's tracked hashes stale.
+//
+// Deliberately cheap, and deliberately not a hash. The write hooks that call this
+// run on every update the game makes, including for textures no mod will ever ask
+// about, so all they do is set a flag. The readback that actually costs something
+// is deferred to EnsureTexture2DHashes below. This is the "flag it dirty on update
+// events" half of on-demand hashing.
+// Hunting mode also keeps these invalidations current while hashing is disabled;
+// it does not queue work unless a hash-tracking option is active.
+void MarkTexture2DHashesDirty(ID3D11Resource *resource, UINT subresource,
+	bool deferred_write)
+{
+	ResourceHandleInfo *info;
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	EnterCriticalSectionPretty(&G->mResourcesLock);
+
+	info = GetResourceHandleInfo(resource);
+	if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+		info->may_have_deferred_writes |= deferred_write;
+		info->texture_hashes_dirty = true;
+		info->texture_hashes_generation++;
+		if ((subresource == 0 || subresource == ~0u) && G->track_texture_updates == 1) {
+			info->data_hash_valid = false;
+			if (info->track_mips)
+				info->hash = 0;
+		}
+		if (subresource == ~0u) {
+			for (auto &mip : info->mip_hash_cache) {
+				mip.generation++;
+				mip.valid = false;
+			}
+		} else if (subresource < info->mip_hash_cache.size()) {
+			info->mip_hash_cache[subresource].generation++;
+			info->mip_hash_cache[subresource].valid = false;
+		}
+		info->lod_candidate_generation++;
+	}
+
+	const auto aliases = G->mCustomMipHashCaches.equal_range(resource);
+	for (auto alias = aliases.first; alias != aliases.second; ++alias) {
+		auto *alias_info = alias->second;
+		alias_info->may_have_deferred_writes |= deferred_write;
+		alias_info->texture_hashes_dirty = true;
+		alias_info->texture_hashes_generation++;
+		auto &mips = alias_info->mip_hash_cache;
+		if (subresource == ~0u) {
+			for (auto &mip : mips) {
+				mip.generation++;
+				mip.valid = false;
+			}
+		} else if (subresource < mips.size()) {
+			mips[subresource].generation++;
+			mips[subresource].valid = false;
+		}
+		alias_info->lod_candidate_generation++;
+	}
+
+	LeaveCriticalSection(&G->mResourcesLock);
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+
+// Clears a texture's dirty flag without hashing anything.
+//
+// Used for resources that can never be read back - multisampled, or a format D3D
+// will not create as a staging resource. Leaving the flag set would make every
+// subsequent check retry the same impossible work, and log about it each time.
+// Caller holds both the critical section and the resource lock. Custom-resource
+// metadata is a borrowed pointer, so only use it while its alias is registered.
+static ResourceHandleInfo *FindTextureHashInfo(ID3D11Resource *resource,
+	ResourceHandleInfo *fallback_info)
+{
+	if (auto *info = GetResourceHandleInfo(resource))
+		return info;
+	if (!fallback_info)
+		return nullptr;
+	const auto aliases = G->mCustomMipHashCaches.equal_range(resource);
+	for (auto it = aliases.first; it != aliases.second; ++it)
+		if (it->second == fallback_info)
+			return fallback_info;
+	return nullptr;
+}
+
+static void ClearTexture2DHashesDirty(ID3D11Resource *resource, uint64_t generation,
+	ResourceHandleInfo *fallback_info)
+{
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	EnterCriticalSectionPretty(&G->mResourcesLock);
+		ResourceHandleInfo *info = FindTextureHashInfo(resource, fallback_info);
+		if (info && info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D &&
+				info->texture_hashes_generation == generation)
+			info->texture_hashes_dirty = false;
+	LeaveCriticalSection(&G->mResourcesLock);
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+
+// Consume completed snapshots once per frame. DO_NOT_WAIT never waits for a
+// queued GPU copy: unfinished maps retain both the staging lease and partial
+// CRCs for the next frame. All subresources belong to the same queued snapshot.
+void HackerContext::PollTextureHashReadbacks()
+{
+	if (mTextureHashPollFrame == G->frame_no)
+		return;
+	mTextureHashPollFrame = G->frame_no;
+	// Limit CPU hashing bursts too. This is a soft 1ms budget: an individual
+	// subresource CRC cannot be interrupted, but remaining work waits a frame.
+	LARGE_INTEGER start, now, frequency;
+	QueryPerformanceFrequency(&frequency);
+	QueryPerformanceCounter(&start);
+	bool budget_exhausted = false;
+	auto orig_context = GetPassThroughOrigContext1();
+	for (auto it = mTextureHashReadbacks.begin(); it != mTextureHashReadbacks.end();) {
+		auto &pending = *it;
+		bool valid;
+		EnterCriticalSectionPretty(&G->mCriticalSection);
+		EnterCriticalSectionPretty(&G->mResourcesLock);
+			auto info = FindTextureHashInfo(pending.source, pending.fallback_info);
+			valid = info && info->texture_hashes_readback_id == pending.readback_id;
+		LeaveCriticalSection(&G->mResourcesLock);
+		LeaveCriticalSection(&G->mCriticalSection);
+		if (!valid) {
+			it = mTextureHashReadbacks.erase(it);
+			continue;
+		}
+
+		const UINT count = pending.want_lod ? Texture2DSubresourceCount(&pending.desc) : 1;
+		bool failed = false;
+		while (pending.next_subresource < count) {
+			const UINT subresource = pending.next_subresource;
+			D3D11_MAPPED_SUBRESOURCE mapped;
+			HRESULT hr = orig_context->Map(pending.staging, subresource,
+					D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+			if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
+				break;
+			if (FAILED(hr)) {
+				LogWarning("EnsureTexture2DHashes: Map(subresource %u) failed hr=0x%08X; mip hashes remain unavailable\n", subresource, hr);
+				failed = true;
+				break;
+			}
+			if (pending.want_lod)
+				pending.crcs[subresource] = CalcSubresourceHash(&pending.desc,
+						subresource % max(pending.desc.MipLevels, 1), mapped.pData, mapped.RowPitch);
+			if (subresource == 0 && pending.want_data_hash) {
+				D3D11_SUBRESOURCE_DATA initial_data = {};
+				initial_data.pSysMem = mapped.pData;
+				initial_data.SysMemPitch = mapped.RowPitch;
+				initial_data.SysMemSlicePitch = mapped.DepthPitch;
+				pending.data_hash = CalcTexture2DDataHash(&pending.hash_desc, &initial_data);
+			}
+			orig_context->Unmap(pending.staging, subresource);
+			pending.next_subresource++;
+			QueryPerformanceCounter(&now);
+			budget_exhausted = now.QuadPart - start.QuadPart >= frequency.QuadPart / 1000;
+			if (budget_exhausted)
+				break;
+		}
+		if (!failed && pending.next_subresource != count) {
+			if (budget_exhausted)
+				return;
+			++it;
+			continue;
+		}
+
+		std::string fa_lods;
+		uint32_t hash = 0;
+		EnterCriticalSectionPretty(&G->mCriticalSection);
+		EnterCriticalSectionPretty(&G->mResourcesLock);
+			info = FindTextureHashInfo(pending.source, pending.fallback_info);
+			if (info && info->texture_hashes_readback_id == pending.readback_id &&
+				info->texture_hashes_generation == pending.generation) {
+				// Give other checked textures a turn before refreshing this one
+				// again. Failed reads also cannot be resubmitted in this frame.
+				info->texture_hashes_last_readback_frame = G->frame_no;
+				if (!failed) {
+					if (pending.want_data_hash && G->track_texture_updates == 1) {
+						info->data_hash = pending.data_hash;
+						info->hash = CalcTexture2DDescHash(pending.data_hash, &info->desc2D);
+						info->data_hash_valid = true;
+					}
+					hash = info->hash;
+					if (pending.want_lod) {
+						info->mip_hash_cache.resize(pending.crcs.size());
+						for (size_t i = 0; i < pending.crcs.size(); ++i) {
+							auto &mip = info->mip_hash_cache[i];
+							mip.hash = pending.crcs[i];
+							mip.hashed_generation = mip.generation;
+							mip.valid = true;
+							mip.deferred_generation = G->mip_hash_deferred_generation;
+							mip.validation_frame = G->frame_no;
+						}
+						info->lod_candidate_generation++;
+						if (G->analyse_frame) {
+							for (UINT i = 0; i < info->mip_hash_cache.size(); i++) {
+								if (!info->mip_hash_cache[i].valid)
+									continue;
+								char entry[40];
+								_snprintf_s(entry, sizeof(entry), _TRUNCATE,
+										fa_lods.empty() ? "lod=[%08x@%u" : " %08x@%u", info->mip_hash_cache[i].hash, i);
+								fa_lods += entry;
+							}
+							if (!fa_lods.empty())
+								fa_lods += "]";
+						}
+					}
+					// Publish the completed snapshot even if the source changed
+					// again; retain dirty in that case so dynamic textures converge
+					// to newer snapshots instead of discarding every completion.
+					if (info->texture_hashes_generation == pending.generation &&
+							(!(G->track_lod_hashes || G->track_lod_hash_updates) || pending.want_lod) &&
+							(G->track_texture_updates != 1 || pending.want_data_hash))
+						info->texture_hashes_dirty = false;
+				}
+			}
+		LeaveCriticalSection(&G->mResourcesLock);
+		LeaveCriticalSection(&G->mCriticalSection);
+		if (!fa_lods.empty())
+			FrameAnalysisLog("3DMigoto EnsureTexture2DHashes hash=%08x %s\n", hash, (char *)fa_lods.c_str());
+		it = mTextureHashReadbacks.erase(it);
+		if (budget_exhausted)
+			return;
+	}
+}
+
+// Queue one snapshot per checked dirty texture. Hashes remain usable while the
+// copy is in flight, and no GPU readback is mapped in the submitting frame.
+void EnsureTexture2DHashes(HackerContext *context, ID3D11Resource *resource,
+	bool force_lod_hashes, ResourceHandleInfo *fallback_info)
+{
+	if (!context || !resource)
+		return;
+	auto orig_context = context->GetPassThroughOrigContext1();
+	// CPU read maps are unsupported on deferred contexts.
+	if (orig_context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
+		return;
+
+	Profiling::State profiling_state;
+	const bool profiling = Profiling::mode == Profiling::Mode::SUMMARY;
+	const bool profile_lod_requests = profiling &&
+		(force_lod_hashes || G->track_lod_hashes || G->track_lod_hash_updates);
+	if (profile_lod_requests)
+		Profiling::lod_hash_tracking_overhead.count++;
+	if (profiling)
+		Profiling::start(&profiling_state);
+
+	context->PollTextureHashReadbacks();
+	// Keep all exits inside this scope so the profiler accounts for polling,
+	// queue submission and cache checks consistently.
+	[&]() {
+		if (context->mTextureHashReadbacks.size() >= HackerContext::MaxTextureHashReadbacks)
+			return;
+		for (auto &pending : context->mTextureHashReadbacks)
+			if (pending.source == resource)
+				return;
+
+		HackerContext::TextureHashReadback pending = {};
+		static std::atomic<uint64_t> next_readback_id {0};
+		EnterCriticalSectionPretty(&G->mCriticalSection);
+		EnterCriticalSectionPretty(&G->mResourcesLock);
+			auto info = FindTextureHashInfo(resource, fallback_info);
+			if (info && fallback_info && info == fallback_info &&
+					info->type == D3D11_RESOURCE_DIMENSION_UNKNOWN) {
+				D3D11_RESOURCE_DIMENSION dimension;
+				resource->GetType(&dimension);
+				if (dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+					info->type = dimension;
+					static_cast<ID3D11Texture2D *>(resource)->GetDesc(&info->desc2D);
+					info->texture_hashes_dirty = true;
+				}
+			}
+			if (!info || info->type != D3D11_RESOURCE_DIMENSION_TEXTURE2D ||
+					(!force_lod_hashes && info->track_mips) ||
+					!info->texture_hashes_dirty || info->texture_hashes_last_readback_frame == G->frame_no) {
+				LeaveCriticalSection(&G->mResourcesLock);
+				LeaveCriticalSection(&G->mCriticalSection);
+				return;
+			}
+			pending.want_lod = force_lod_hashes || G->track_lod_hashes || G->track_lod_hash_updates;
+			pending.fallback_info = info == fallback_info ? fallback_info : nullptr;
+			pending.want_data_hash = G->track_texture_updates == 1;
+			pending.generation = info->texture_hashes_generation;
+			pending.hash_desc = info->desc2D;
+			pending.readback_id = ++next_readback_id;
+			info->texture_hashes_readback_id = pending.readback_id;
+		LeaveCriticalSection(&G->mResourcesLock);
+		LeaveCriticalSection(&G->mCriticalSection);
+		if (!pending.want_lod && !pending.want_data_hash)
+			return;
+
+		((ID3D11Texture2D *)resource)->GetDesc(&pending.desc);
+		if (pending.desc.SampleDesc.Count > 1) {
+			ClearTexture2DHashesDirty(resource, pending.generation, pending.fallback_info);
+			return;
+		}
+		pending.staging = context->GetStagingTexture2D(pending.desc);
+		if (!pending.staging) {
+			ClearTexture2DHashesDirty(resource, pending.generation, pending.fallback_info);
+			return;
+		}
+		pending.source = resource;
+		if (pending.want_lod) {
+			pending.crcs.assign(Texture2DSubresourceCount(&pending.desc), 0);
+			// Queue the entire mip chain together instead of alternating one
+			// copy with one blocking map for each mip and array slice.
+			orig_context->CopyResource(pending.staging, resource);
+		} else {
+			orig_context->CopySubresourceRegion(pending.staging, 0, 0, 0, 0, resource, 0, NULL);
+		}
+		if (profile_lod_requests && pending.want_lod)
+			Profiling::lod_hash_tracking_overhead.hits++;
+		context->mTextureHashReadbacks.push_back(std::move(pending));
+	}();
+	if (profiling)
+		Profiling::end(&profiling_state, &Profiling::lod_hash_tracking_overhead);
+}
+
+// Validate cached CRCs against writes that can bypass CPU upload tracking.
+static void ValidateMipHashCache(ResourceHandleInfo::MipHashCache &mip,
+	const D3D11_TEXTURE2D_DESC &desc, bool cpu_tracked)
+{
+	// Rendering and external sharing can bypass the CPU update hooks.
+	const bool volatile_contents = (desc.BindFlags & (D3D11_BIND_RENDER_TARGET |
+		D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_UNORDERED_ACCESS)) ||
+		(desc.MiscFlags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX |
+		D3D11_RESOURCE_MISC_SHARED_NTHANDLE));
+	if (mip.deferred_generation != G->mip_hash_deferred_generation) {
+		mip.deferred_generation = G->mip_hash_deferred_generation;
+		if (!cpu_tracked || volatile_contents)
+			mip.generation++;
+	}
+	if (volatile_contents && mip.validation_frame != G->frame_no) {
+		mip.validation_frame = G->frame_no;
+		mip.generation++;
+	}
+}
+
+void RegisterCustomTextureMipHashCache(ID3D11Resource *resource, ResourceHandleInfo *info)
+{
+	if (!resource || !info)
+		return;
+	CriticalSectionGuard(&G->mCriticalSection);
+	auto range = G->mCustomMipHashCaches.equal_range(resource);
+	for (auto it = range.first; it != range.second; ++it)
+		if (it->second == info)
+			return;
+	G->mCustomMipHashCaches.emplace(resource, info);
+}
+
+void UnregisterCustomTextureMipHashCache(ID3D11Resource *resource, ResourceHandleInfo *info)
+{
+	if (!resource || !info)
+		return;
+	CriticalSectionGuard(&G->mCriticalSection);
+	auto range = G->mCustomMipHashCaches.equal_range(resource);
+	for (auto it = range.first; it != range.second; ++it) {
+		if (it->second == info) {
+			G->mCustomMipHashCaches.erase(it);
+			break;
+		}
+	}
+	// A custom resource may later reuse this metadata with a different D3D
+	// resource. Invalidate any queued snapshot and its old description.
+	info->mip_hash_cache.clear();
+	info->type = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+	info->texture_hashes_dirty = false;
+	info->texture_hashes_generation++;
+	info->texture_hashes_readback_id = 0;
+	info->texture_hashes_last_readback_frame = ~0u;
+	info->may_have_deferred_writes = false;
+}
+
+std::vector<uint32_t> GetCachedTexture2DMipHashes(ID3D11Resource *resource,
+	ResourceHandleInfo *fallback_info)
+{
+	std::vector<uint32_t> hashes;
+	if (!resource)
+		return hashes;
+	D3D11_RESOURCE_DIMENSION dimension;
+	resource->GetType(&dimension);
+	if (dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+		return hashes;
+	D3D11_TEXTURE2D_DESC desc;
+	static_cast<ID3D11Texture2D *>(resource)->GetDesc(&desc);
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	EnterCriticalSectionPretty(&G->mResourcesLock);
+		auto info = GetResourceHandleInfo(resource);
+		if (!info)
+			info = fallback_info;
+		if (info) {
+			const bool cpu_tracked = !info->may_have_deferred_writes && info->track_mips;
+			for (auto &mip : info->mip_hash_cache) {
+				ValidateMipHashCache(mip, desc, cpu_tracked);
+				if (mip.valid && mip.hashed_generation == mip.generation)
+					hashes.push_back(mip.hash);
+			}
+		}
+	LeaveCriticalSection(&G->mResourcesLock);
+	LeaveCriticalSection(&G->mCriticalSection);
+	return hashes;
 }
 
 // Must be called with the critical section held to protect mResources against
@@ -844,8 +1525,13 @@ uint32_t GetOrigResourceHash(ID3D11Resource *resource)
 uint32_t GetResourceHash(ID3D11Resource *resource)
 {
 	ResourceHandleInfo *handle_info = GetResourceHandleInfo(resource);
-	if (handle_info)
+	if (handle_info) {
+		if (G->track_texture_updates == 1 && handle_info->may_have_deferred_writes &&
+			!handle_info->mip_hash_cache.empty() &&
+			handle_info->mip_hash_cache[0].deferred_generation != G->mip_hash_deferred_generation)
+			return 0;
 		return handle_info->hash;
+	}
 
 	// We can get here for a few legitimate reasons where a resource has
 	// not been hashed. Resources created by 3DMigoto bypass the
@@ -1191,79 +1877,6 @@ out_unlock:
 		Profiling::end(&profiling_state, &Profiling::hash_tracking_overhead);
 }
 
-void PropagateResourceHash(ID3D11Resource *dst, ID3D11Resource *src)
-{
-	ResourceHandleInfo *dst_info, *src_info;
-	D3D11_RESOURCE_DIMENSION dim;
-	D3D11_TEXTURE2D_DESC *desc2D;
-	D3D11_TEXTURE3D_DESC *desc3D;
-	uint32_t old_data_hash, old_hash;
-	Profiling::State profiling_state;
-
-	if (Profiling::mode == Profiling::Mode::SUMMARY)
-		Profiling::start(&profiling_state);
-
-	EnterCriticalSectionPretty(&G->mCriticalSection);
-
-	dst_info = GetResourceHandleInfo(dst);
-	if (!dst_info)
-		goto out_unlock;
-
-	if (!supports_hash_tracking(dst_info))
-		goto out_unlock;
-
-	src_info = GetResourceHandleInfo(src);
-	if (!src_info)
-		goto out_unlock;
-
-	// If there was no initial data in either source or destination, or
-	// they both contain the same data, we don't need to recalculate the
-	// hash as it will not change:
-	if (src_info->data_hash == dst_info->data_hash)
-		goto out_unlock;
-
-	// XXX: If the destination had an initial data but the source did not
-	// we will currently discard the data part of the hash - is that the
-	// best thing to do, or should we leave the destination untouched? I'm
-	// going on the assumption that we care more about what the hash
-	// represents *now* rather than when it was created and if a texture is
-	// being dynamically updated by the GPU it doesn't make sense to use
-	// the initial data hash... but I'm not certain that will be the best
-	// decision for every game... We could always make it an option in the
-	// d3dx.ini if need be...
-
-	old_data_hash = dst_info->data_hash;
-	old_hash = dst_info->hash;
-
-	dst_info->data_hash = src_info->data_hash;
-
-	dst->GetType(&dim);
-	switch (dim) {
-		case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
-			desc2D = &dst_info->desc2D;
-			// TODO: tex2D->GetDesc(&desc2D); then fix up mip-maps if necessary
-
-			dst_info->hash = CalcTexture2DDescHash(dst_info->data_hash, desc2D);
-			break;
-		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
-			desc3D = &dst_info->desc3D;
-			// TODO: tex3D->GetDesc(&desc3D); then fix up mip-maps if necessary
-
-			dst_info->hash = CalcTexture3DDescHash(dst_info->data_hash, desc3D);
-			break;
-	}
-
-	LogDebug("Propagated resource hash\n");
-	LogDebug("  old data: %08x new data: %08x\n", old_data_hash, dst_info->data_hash);
-	LogDebug("  old hash: %08x new hash: %08x\n", old_hash, dst_info->hash);
-
-out_unlock:
-	LeaveCriticalSection(&G->mCriticalSection);
-
-	if (Profiling::mode == Profiling::Mode::SUMMARY)
-		Profiling::end(&profiling_state, &Profiling::hash_tracking_overhead);
-}
-
 bool MapTrackResourceHashUpdate(ID3D11Resource *pResource, UINT Subresource)
 {
 	if (G->hunting && G->track_texture_updates != 2) { // Any hunting mode - want to catch hash contamination even while soft disabled
@@ -1450,7 +2063,8 @@ void find_texture_overrides_for_resource_by_hash_from_fuzzy_matches(ID3D11Resour
 
 // find_texture_overrides_for_desc without the draw context filter, for caching:
 template <typename DescType>
-static void collect_fuzzy_texture_overrides_for_desc(const DescType *desc, std::vector<TextureOverride*> *out)
+static void collect_fuzzy_texture_overrides_for_desc(const DescType *desc,
+	bool initial_data_supplied, std::vector<TextureOverride*> *out)
 {
 	FuzzyTextureOverrides::iterator i;
 	Profiling::State profiling_state;
@@ -1461,7 +2075,8 @@ static void collect_fuzzy_texture_overrides_for_desc(const DescType *desc, std::
 	}
 
 	for (i = G->mFuzzyTextureOverrides.begin(); i != G->mFuzzyTextureOverrides.end(); i++) {
-		if ((*i)->texture_override->filter.matches_desc(desc))
+		if ((*i)->texture_override->filter.matches_desc(desc) &&
+			(*i)->texture_override->filter.matches_initial_data(initial_data_supplied))
 			out->push_back((*i)->texture_override);
 	}
 
@@ -1474,6 +2089,10 @@ static void collect_fuzzy_texture_overrides_for_desc(const DescType *desc, std::
 
 static void collect_fuzzy_texture_overrides_for_resource(ID3D11Resource *resource, std::vector<TextureOverride*> *out)
 {
+	ResourceHandleInfo *handle_info = GetResourceHandleInfo(resource);
+	if (!handle_info)
+		return;
+	const bool initial_data_supplied = handle_info->initial_data_supplied;
 	D3D11_RESOURCE_DIMENSION dimension;
 	resource->GetType(&dimension);
 	switch (dimension) {
@@ -1481,25 +2100,25 @@ static void collect_fuzzy_texture_overrides_for_resource(ID3D11Resource *resourc
 		{
 			D3D11_BUFFER_DESC desc;
 			((ID3D11Buffer*)resource)->GetDesc(&desc);
-			return collect_fuzzy_texture_overrides_for_desc(&desc, out);
+			return collect_fuzzy_texture_overrides_for_desc(&desc, initial_data_supplied, out);
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
 		{
 			D3D11_TEXTURE1D_DESC desc;
 			((ID3D11Texture1D*)resource)->GetDesc(&desc);
-			return collect_fuzzy_texture_overrides_for_desc(&desc, out);
+			return collect_fuzzy_texture_overrides_for_desc(&desc, initial_data_supplied, out);
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
 		{
 			D3D11_TEXTURE2D_DESC desc;
 			((ID3D11Texture2D*)resource)->GetDesc(&desc);
-			return collect_fuzzy_texture_overrides_for_desc(&desc, out);
+			return collect_fuzzy_texture_overrides_for_desc(&desc, initial_data_supplied, out);
 		}
 		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
 		{
 			D3D11_TEXTURE3D_DESC desc;
 			((ID3D11Texture3D*)resource)->GetDesc(&desc);
-			return collect_fuzzy_texture_overrides_for_desc(&desc, out);
+			return collect_fuzzy_texture_overrides_for_desc(&desc, initial_data_supplied, out);
 		}
 	}
 }
@@ -1512,6 +2131,12 @@ void InvalidateTextureOverrideCandidates()
 		entry.second.texture_override_candidates_valid = false;
 		entry.second.texture_override_candidates.hash_matches = NULL;
 		entry.second.texture_override_candidates.fuzzy_matches.clear();
+		entry.second.texture_override_candidates.lod_hash_matches.clear();
+		// Force a rebuild of the lod_hash list on the next lookup, as the
+		// sections it points at are about to be discarded and rebuilt. Bumping
+		// the generation rather than clearing the cached generation is what
+		// makes the lookup notice.
+		entry.second.lod_candidate_generation++;
 	}
 
 	LeaveCriticalSection(&G->mResourcesLock);
@@ -1532,6 +2157,25 @@ TextureOverrideCandidates* get_texture_override_candidates(ID3D11Resource *resou
 	ResourceHandleInfo *handle_info = GetResourceHandleInfo(resource);
 	if (!handle_info)
 		return NULL;
+	if (handle_info->type == D3D11_RESOURCE_DIMENSION_TEXTURE2D &&
+		handle_info->may_have_deferred_writes) {
+		bool invalidated = false;
+		for (auto &mip : handle_info->mip_hash_cache) {
+			if (mip.deferred_generation != G->mip_hash_deferred_generation) {
+				mip.deferred_generation = G->mip_hash_deferred_generation;
+				mip.generation++;
+				mip.valid = false;
+				invalidated = true;
+			}
+		}
+		if (invalidated) {
+			handle_info->lod_candidate_generation++;
+			if (G->track_texture_updates == 1 && handle_info->track_mips) {
+				handle_info->data_hash_valid = false;
+				handle_info->hash = 0;
+			}
+		}
+	}
 
 	TextureOverrideCandidates *candidates = &handle_info->texture_override_candidates;
 
@@ -1553,6 +2197,35 @@ TextureOverrideCandidates* get_texture_override_candidates(ID3D11Resource *resou
 		}
 
 		handle_info->texture_override_hash = handle_info->hash;
+	}
+
+	// Tracked separately from the hash list above because it is invalidated by
+	// mips streaming in, not by the resource hash changing. Without this a
+	// texture created empty would never pick up its lod_hash sections, as the
+	// empty vector would be cached before any mip arrived.
+	if (G->mTextureOverrideLodMap &&
+			handle_info->texture_override_lod_generation != handle_info->lod_candidate_generation) {
+		candidates->lod_hash_matches.clear();
+
+		for (const auto &mip : handle_info->mip_hash_cache) {
+			if (!mip.valid || mip.hashed_generation != mip.generation)
+				continue;
+			uint32_t lod_hash = mip.hash;
+			// A zero entry means that subresource has no known contents - either
+			// not streamed in yet, or dropped by a partial update. It must never
+			// match, or an empty texture would match a `lod_hash = 0` section.
+			if (!lod_hash)
+				continue;
+
+			TextureOverrideMap::iterator i = G->mTextureOverrideLodMap->find(lod_hash);
+			if (i == G->mTextureOverrideLodMap->end())
+				continue;
+
+			for (TextureOverride &to : i->second)
+				candidates->lod_hash_matches.push_back(&to);
+		}
+
+		handle_info->texture_override_lod_generation = handle_info->lod_candidate_generation;
 	}
 
 	return candidates;
@@ -1659,6 +2332,10 @@ void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverri
 				if (to.filter.matches_draw_conditions(call_info))
 					matches->push_back(&to);
 			}
+		}
+		for (TextureOverride *to : candidates->lod_hash_matches) {
+			if (to->filter.matches_draw_conditions(call_info))
+				matches->push_back(to);
 		}
 		for (TextureOverride *to : candidates->fuzzy_matches) {
 			if (to->filter.matches_draw_conditions(call_info))

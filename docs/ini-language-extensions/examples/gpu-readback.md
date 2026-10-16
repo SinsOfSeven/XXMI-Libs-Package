@@ -1,6 +1,6 @@
 # GPU Readback
 
-Suppose the distance from the camera to a character lives in a constant buffer, and the INI script needs it on the CPU side to decide which vertex buffer variant to bind. The [`store`](../commands/README.md/#store) command reads a single 32-bit value back from a GPU resource into an INI variable or a [pool variable](../pools/variables.md).
+Suppose the distance from the camera to a character lives in a constant buffer, and the INI script needs it on the CPU side to decide which vertex buffer variant to bind. The [`store`](../commands/README.md#store) command reads a single 32-bit value back from a GPU resource into an INI variable or a [pool variable](../pools/variables.md).
 
 > ⚠️ **`store` is VERY expensive** unless the buffer is [cached in RAM](#reading-without-a-stall). A readback forces the CPU to wait until the GPU has finished all queued work and copied the value back, which throws away the CPU/GPU parallelism the game relies on. A `store` that runs on every draw call, or even once per frame for several objects, **will kill the frame rate**. Treat it as a last resort, and never let it run unconditionally in a `[TextureOverride]` or `[ShaderOverride]` section: always gate it so it executes rarely, as shown in [Reading Sparingly](#reading-sparingly).
 
@@ -50,7 +50,7 @@ if @vs-cb1 != $last_cb
 endif
 ```
 
-Here [`@vs-cb1`](../resources/resource-metadata.md/#resource-identity) is a cheap identity of the bound buffer, so the readback only happens when the game switches to a different constant buffer.
+Here [`@vs-cb1`](../resources/resource-metadata.md#resource-identity) is a cheap identity of the bound buffer, so the readback only happens when the game switches to a different constant buffer.
 
 ## Reading Without a Stall
 
@@ -101,4 +101,4 @@ Before reaching for `store`, check whether the decision can be made without leav
 
 * [Resource metadata](../resources/resource-metadata.md) such as `->Size`, `->Stride`, `->Format` or `@` identity costs nanoseconds and often distinguishes the cases that a readback would.
 * A custom shader can branch on the value itself, so the choice is made on the GPU instead of the CPU.
-* [`->HashRegion`](../resources/resource-metadata.md/#hashregionbyte_offset-byte_size) tells whether data changed without stalling, for the buffer types listed in `cache_resource_data`.
+* [`->HashRegion`](../resources/resource-metadata.md#hashregionbyte_offset-byte_size) tells whether data changed without stalling, for the buffer types listed in `cache_resource_data`.

@@ -46,3 +46,17 @@ cache_resource_data = constant_buffer
 The cache only holds what the CPU wrote. A buffer the GPU produced, such as the output of a custom compute shader, still takes the readback path above, and so does any buffer of a type that is not cached.
 
 See [GPU Readback](../examples/gpu-readback.md) for practical usage patterns.
+
+## `ensuremiphashes`
+
+Requests the full mip and array-slice CRC chain for a Texture2D. The command queues a GPU snapshot when its cached hashes are dirty and returns without waiting for the readback. Completed CRCs become available to [`->Match(hash)`](../resources/filters.md#matching-raw-hashes) and frame analysis after a later poll.
+
+```ini
+ensuremiphashes = ps-t0
+ensuremiphashes = ps-t[0:6]
+ensuremiphashes = ResourceTexture
+```
+
+The argument is a resource target or an inclusive SRV slot range. Each resource is checked independently. A clean cache is reused; a write invalidates affected mips. A readback can take more than one frame, so a `->Match(hash)` in the same command list may still see no mip CRC. The command automatically enables write invalidation tracking, without scanning every texture.
+
+This request reads back the whole Texture2D when CPU upload tracking has no current CRCs. It does no blocking `Map` in the submitting command list. Multisampled textures and deferred contexts are unsupported. For an opt-in path that captures CPU uploads without readback, use [`track_mips = 1`](../resources/lod-hashes.md) on a matching `[TextureOverride]`.
