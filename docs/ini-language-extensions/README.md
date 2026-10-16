@@ -8,6 +8,8 @@
 * [Expressions](expressions/README.md) — new operators and functions
 * [Variables](variables/README.md) — extended variable declarations and read-only mode
 * [Resources](resources/README.md) — resource metadata, buffer regions, slot ranges, filters and LOD hashes
+* [Shader Declarations](shaders/README.md) — CB and SRV metadata exposed by shader targets
 * [Pools](pools/README.md) — indexed storage for resources and variables
 * [Input Layouts](input-layouts/README.md) — vertex input layout overrides
 * [Examples](examples/README.md) — practical scripts combining the extensions above
+* [Testing Reference](testing-reference.md) — compact syntax and behavior checklist

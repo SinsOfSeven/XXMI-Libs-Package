@@ -1034,10 +1034,14 @@ enum class ShaderTargetEvaluationMode : uint32_t {
 	DCL_CB_TYPE        = 0b00000000000000000000000000000100,
 	DCL_CB_SIZE        = 0b00000000000000000000000000001000,
 
-	DCL_SRV_MASK       = 0b00000000000000000000000000010000,
+	DCL_SRV_DECLARES   = 0b00000000000000000000000000010000,
 	DCL_SRV_TYPE       = 0b00000000000000000000000000100000,
 	DCL_SRV_DIMENSION  = 0b00000000000000000000000001000000,
 	DCL_SRV_STRIDE     = 0b00000000000000000000000010000000,
+	DCL_CB_MIN         = 0b00000000000000000000001000000000,
+	DCL_CB_MAX         = 0b00000000000000000000010000000000,
+	DCL_SRV_MIN        = 0b00000000000000000000100000000000,
+	DCL_SRV_MAX        = 0b00000000000000000001000000000000,
 
 	// Reserved for a future shader filter (a `[Filter<Name>]` evaluated against
 	// the currently bound shader instead of a resource).
@@ -1801,6 +1805,9 @@ public:
 
 	void run(CommandListState*) override;
 	bool noop(bool post, bool ignore_cto_pre, bool ignore_cto_post) override;
+
+private:
+	void RunSlot(CommandListState *state);
 };
 
 class EnsureMipHashesCommand : public CommandListCommand {

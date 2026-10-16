@@ -56,6 +56,25 @@ ps-t[0:3] = ref ResourceFoo   ; Bind the same resource to ps-t0–ps-t3
 ps-t[0:3] = null              ; Unbind ps-t0–ps-t3
 ```
 
+`checktextureoverride` and `ensuremiphashes` also accept SRV ranges:
+
+```ini
+checktextureoverride = ps-t[0:127]
+ensuremiphashes = ps-t[0:127]
+```
+
+Each `checktextureoverride` slot is evaluated separately. When the shader declaration cache knows the current shader's bindings, undeclared SRV slots continue to be skipped. The declared bounds can narrow the range further:
+
+```ini
+local $srv_min = ps->srv_min
+local $srv_max = ps->srv_max
+if $srv_min >= 0
+    checktextureoverride = ps-t[$srv_min:$srv_max]
+endif
+```
+
+`srv_min`/`srv_max` return the first and last declared SRV slots; `cb_min`/`cb_max` return the equivalent constant-buffer bounds. The range includes any gaps between declarations, where per-slot checks still apply. All four return `-1` when declarations are known to be empty. If metadata is unknown, they return the full valid slot bounds as a conservative fallback.
+
 When the copy type is omitted, the usual 3DMigoto rules apply: binding a custom resource to a slot is a `ref`, fetching a slot into a custom resource is a `copy`.
 
 Slot bounds are validated at runtime: `$first` must not be negative, `$last` must not be smaller than `$first`, and `$last` must be a valid slot number. An invalid range logs a warning and the operation is skipped.

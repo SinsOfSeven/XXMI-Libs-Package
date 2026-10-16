@@ -4,6 +4,7 @@
 
 #include "CommandList.h"
 #include "ShaderStage.h"
+#include "ShaderBytecodeRecord.h"
 
 #include <DDSTextureLoader.h>
 #include <algorithm>
@@ -1436,6 +1437,29 @@ void CheckTextureOverrideCommand::run(CommandListState *state)
 	if (target.IsRange() && !target.ResolveRange(state, &first, &count))
 		return;
 
+	// A known shader declaration set can prove that an SRV slot cannot be used
+	// by the draw. Unknown shaders and unknown declarations retain normal matching.
+	UINT64 shader_hash = 0;
+	bool have_shader_hash = false;
+	if (target.type == ResourceCopyTargetType::SHADER_RESOURCE) {
+		ID3D11DeviceChild *shader = nullptr;
+		switch (target.shader_type) {
+		case L'v': shader = state->mHackerContext->mCurrentVertexShaderHandle; break;
+		case L'h': shader = state->mHackerContext->mCurrentHullShaderHandle; break;
+		case L'd': shader = state->mHackerContext->mCurrentDomainShaderHandle; break;
+		case L'g': shader = state->mHackerContext->mCurrentGeometryShaderHandle; break;
+		case L'p': shader = state->mHackerContext->mCurrentPixelShaderHandle; break;
+		case L'c': shader = state->mHackerContext->mCurrentComputeShaderHandle; break;
+		}
+		if (shader) {
+			ShaderMap::iterator shader_it = lookup_shader_hash(shader);
+			if (shader_it != G->mShaders.end()) {
+				shader_hash = shader_it->second;
+				have_shader_hash = true;
+			}
+		}
+	}
+
 	saved_this = state->this_target;
 	for (unsigned s = 0; s < count; s++) {
 		TextureOverrideMatches matches;
@@ -1461,6 +1485,15 @@ void CheckTextureOverrideCommand::run(CommandListState *state)
 		}
 
 		state->this_target = &checked;
+		if (have_shader_hash) {
+			unsigned slot = checked.ResolveSlot(state);
+			uint32_t declared = 1;
+			if (slot < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT &&
+				shader_bytecode_record_query_declaration(shader_hash,
+					shader_stage_from_letter(target.shader_type), ShaderDeclarationField::SRV_DECLARES,
+					slot, &declared) && !declared)
+				continue;
+		}
 		checked.FindTextureOverrides(state, NULL, &matches);
 
 		if (run_pre_and_post_together) {
@@ -3378,6 +3411,12 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 {
 	HackerContext *mHackerContext = state->mHackerContext;
 	ID3D11DeviceChild *shader = NULL;
+	const auto mode = shader_target.evaluation_mode;
+	const bool cb_range = mode == ShaderTargetEvaluationMode::DCL_CB_MIN ||
+		mode == ShaderTargetEvaluationMode::DCL_CB_MAX;
+	const bool srv_range = mode == ShaderTargetEvaluationMode::DCL_SRV_MIN ||
+		mode == ShaderTargetEvaluationMode::DCL_SRV_MAX;
+	const bool declaration_range = cb_range || srv_range;
 
 	switch (shader_target.shader_type)
 	{
@@ -3405,12 +3444,17 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 	}
 
 	if (!shader)
-		return -0.0;  // Negative zero means no shader bound.
+		return declaration_range ? -1.0f : -0.0f;  // Negative means no shader/range available.
 
 	ShaderMap::iterator shader_it = lookup_shader_hash(shader);
 
-	if (shader_it == G->mShaders.end())
+	if (shader_it == G->mShaders.end()) {
+		if (declaration_range)
+			return mode == ShaderTargetEvaluationMode::DCL_CB_MIN || mode == ShaderTargetEvaluationMode::DCL_SRV_MIN
+				? 0.0f : (float)((cb_range ? D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT
+					: D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) - 1);
 		return 0.0;
+	}
 
 	if (shader_target.evaluation_mode == ShaderTargetEvaluationMode::SHADER)
 	{
@@ -3426,21 +3470,89 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 
 	//LogDebug("ShaderTarget Member Evaluation hash=%016I64x\n", shader_it->second);
 
-	// TODO(shader filters): handle ShaderTargetEvaluationMode::RESERVED_SHADER_FILTER
-	// here, before the cache lookup below (which currently asserts the shader is
-	// registered). Evaluation should reuse the FilterExpr matcher with the shader
-	// hash and/or its derived bytecode as the match context.
+	if (declaration_range) {
+		uint32_t first, last;
+		if (shader_bytecode_record_query_declaration_range(shader_it->second,
+				shader_stage_from_letter(shader_target.shader_type), cb_range, &first, &last)) {
+			if (first == UINT32_MAX)
+				return -1.0f;
+			return mode == ShaderTargetEvaluationMode::DCL_CB_MIN || mode == ShaderTargetEvaluationMode::DCL_SRV_MIN
+				? (float)first : (float)last;
+		}
 
-	auto it = G->mShaderBindingsCache.find(shader_it->second);
-	if (it == G->mShaderBindingsCache.end()) {
-		assert(false);
-		return 0.0;  // Safety check, should never happen;
+		CriticalSectionGuard(&G->mShaderBindingsLock);
+		auto it = G->mShaderBindingsCache.find(shader_it->second);
+		if (it == G->mShaderBindingsCache.end())
+			return mode == ShaderTargetEvaluationMode::DCL_CB_MIN || mode == ShaderTargetEvaluationMode::DCL_SRV_MIN
+				? 0.0f : (float)((cb_range ? D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT
+					: D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) - 1);
+
+		first = UINT32_MAX;
+		last = UINT32_MAX;
+		if (cb_range) {
+			for (uint32_t slot = 0; slot < it->second.constant_buffers.size(); ++slot) {
+				if (it->second.constant_buffers[slot].type == ShaderConstantBufferType::NONE)
+					continue;
+				if (first == UINT32_MAX)
+					first = slot;
+				last = slot;
+			}
+		} else {
+			for (uint32_t slot = 0; slot < it->second.resources.size(); ++slot) {
+				if (it->second.resources[slot].type == ShaderResourceType::NONE)
+					continue;
+				if (first == UINT32_MAX)
+					first = slot;
+				last = slot;
+			}
+		}
+		if (first == UINT32_MAX)
+			return -1.0f;
+		return mode == ShaderTargetEvaluationMode::DCL_CB_MIN || mode == ShaderTargetEvaluationMode::DCL_SRV_MIN
+			? (float)first : (float)last;
 	}
 
-	UINT slot_id = (UINT)shader_target.member_args[0].GetValue(state);
+	float raw_slot = mode == ShaderTargetEvaluationMode::DCL_CB_MASK
+		? 0.0f : shader_target.member_args[0].GetValue(state);
+	if (!(raw_slot >= 0.0f) || raw_slot != floorf(raw_slot))
+		return -1.0f;
+	const bool cb_field = mode == ShaderTargetEvaluationMode::DCL_CB_MASK ||
+		mode == ShaderTargetEvaluationMode::DCL_CB_TYPE || mode == ShaderTargetEvaluationMode::DCL_CB_SIZE;
+	if (raw_slot >= (cb_field ? D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT
+			: D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT))
+		return -1.0f;
+	UINT slot_id = (UINT)raw_slot;
+	ShaderDeclarationField field;
+	switch (mode) {
+	case ShaderTargetEvaluationMode::DCL_CB_MASK: field = ShaderDeclarationField::CB_MASK; break;
+	case ShaderTargetEvaluationMode::DCL_CB_TYPE: field = ShaderDeclarationField::CB_TYPE; break;
+	case ShaderTargetEvaluationMode::DCL_CB_SIZE: field = ShaderDeclarationField::CB_SIZE; break;
+	case ShaderTargetEvaluationMode::DCL_SRV_DECLARES: field = ShaderDeclarationField::SRV_DECLARES; break;
+	case ShaderTargetEvaluationMode::DCL_SRV_TYPE: field = ShaderDeclarationField::SRV_TYPE; break;
+	case ShaderTargetEvaluationMode::DCL_SRV_STRIDE: field = ShaderDeclarationField::SRV_STRIDE; break;
+	case ShaderTargetEvaluationMode::DCL_SRV_DIMENSION: field = ShaderDeclarationField::SRV_DIMENSION; break;
+	default: return 0.0f;
+	}
+	uint32_t value;
+	if (shader_bytecode_record_query_declaration(shader_it->second,
+			shader_stage_from_letter(shader_target.shader_type), field, slot_id, &value))
+		return value == UINT32_MAX ? -1.0f : (float)value;
 
-	switch (shader_target.evaluation_mode)
+	CriticalSectionGuard(&G->mShaderBindingsLock);
+	auto it = G->mShaderBindingsCache.find(shader_it->second);
+	if (it == G->mShaderBindingsCache.end())
+		return -1.0f;
+
+	switch (mode)
 	{
+	case ShaderTargetEvaluationMode::DCL_CB_MASK:
+	{
+		uint32_t mask = 0;
+		for (unsigned i = 0; i < it->second.constant_buffers.size(); ++i)
+			if (it->second.constant_buffers[i].type != ShaderConstantBufferType::NONE)
+				mask |= 1u << i;
+		return (float)mask;
+	}
 	case ShaderTargetEvaluationMode::DCL_CB_TYPE:
 	{
 		ShaderConstantBuffer& cb = it->second.constant_buffers[slot_id];
@@ -3462,6 +3574,8 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 
 		return (float)t.type;
 	}
+	case ShaderTargetEvaluationMode::DCL_SRV_DECLARES:
+		return it->second.resources[slot_id].type != ShaderResourceType::NONE ? 1.0f : 0.0f;
 	case ShaderTargetEvaluationMode::DCL_SRV_STRIDE:
 	{
 		ShaderResource& t = it->second.resources[slot_id];
@@ -8266,13 +8380,12 @@ IniParserResult ShaderTarget::ParseTargetMember(
 {
 	//LogInfo("ShaderTarget::ParseTargetMember: target=%ls, length=%d\n", target, length);
 
-	// TODO(shader filters): add a `->match` member here (and remove the
-	// RESERVED_SHADER_FILTER placeholder) once shader filtering is implemented.
-
-	if (length < 11) // Smallest possible match is "vs->cb_mask".
+	if (length < 10) // Smallest possible match is "vs->cb_min".
 		return IniParserResult::TOKEN_NOT_FOUND;
 
 	static constexpr MemberInfo members[] = {
+		{ L"->cb_min",          8, ShaderTargetEvaluationMode::DCL_CB_MIN },
+		{ L"->cb_max",          8, ShaderTargetEvaluationMode::DCL_CB_MAX },
 		{ L"->cb_mask",         9, ShaderTargetEvaluationMode::DCL_CB_MASK },
 		{ L"->cb_type",         9, ShaderTargetEvaluationMode::DCL_CB_TYPE, {{
 			MemberArg::Type::Unsigned, // Slot ID
@@ -8280,11 +8393,15 @@ IniParserResult ShaderTarget::ParseTargetMember(
 		{ L"->cb_size",         9, ShaderTargetEvaluationMode::DCL_CB_SIZE, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },
-		{ L"->srv_mask",       10, ShaderTargetEvaluationMode::DCL_SRV_MASK },
+		{ L"->srv_min",         9, ShaderTargetEvaluationMode::DCL_SRV_MIN },
+		{ L"->srv_max",         9, ShaderTargetEvaluationMode::DCL_SRV_MAX },
 		{ L"->srv_type",       10, ShaderTargetEvaluationMode::DCL_SRV_TYPE, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },
 		{ L"->srv_stride",     12, ShaderTargetEvaluationMode::DCL_SRV_STRIDE, {{
+			MemberArg::Type::Unsigned, // Slot ID
+		}} },
+		{ L"->srv_declares",   14, ShaderTargetEvaluationMode::DCL_SRV_DECLARES, {{
 			MemberArg::Type::Unsigned, // Slot ID
 		}} },
 		{ L"->srv_dimension",  15, ShaderTargetEvaluationMode::DCL_SRV_DIMENSION, {{
