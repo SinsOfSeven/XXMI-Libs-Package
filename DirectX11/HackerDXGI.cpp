@@ -71,6 +71,7 @@
 #include "CommandList.h"
 #include "ShaderRegex.h"
 #include "ShaderBytecodeRecord.h"
+#include "ResourcePersist.h"
 #include "profiling.h"
 #include "cursor.h" // For InstallHookLate
 
@@ -427,6 +428,9 @@ STDMETHODIMP_(ULONG) HackerSwapChain::Release(THIS)
 
 	if (ulRef <= 0)
 	{
+		// The swap chain still owns device/context references here. Readback is
+		// safe before releasing those references, outside the DLL loader lock.
+		if (mHackerDevice) ResourcePersistCheckpoint(mHackerDevice->GetPassThroughOrigDevice1());
 		if (mHackerDevice) {
 			if (mHackerDevice->GetHackerSwapChain() == this) {
 				LogInfo("  Clearing mHackerDevice->mHackerSwapChain\n");

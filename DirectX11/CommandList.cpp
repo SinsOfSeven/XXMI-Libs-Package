@@ -4,6 +4,7 @@
 
 #include "CommandList.h"
 #include "ShaderStage.h"
+#include "ResourcePersist.h"
 
 #include <DDSTextureLoader.h>
 #include <algorithm>
@@ -716,6 +717,32 @@ static bool ParseCheckTextureOverride(const wchar_t *section,
 	return false;
 }
 
+class PersistDirtyCommand : public CommandListCommand {
+public:
+	ResourceCopyTarget target;
+	void run(CommandListState *state) override {
+		COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
+		if (target.type == ResourceCopyTargetType::POOL)
+			ResourcePersistDirtyPool(target.custom_resource_pool);
+		else
+			ResourcePersistDirty(target.GetCustomResource(state));
+	}
+};
+
+static bool ParsePersistDirty(const wchar_t *section, const wchar_t *key, wstring *val,
+	CommandList *explicit_command_list, CommandList *pre_command_list,
+	CommandList *post_command_list, const wstring *ini_namespace)
+{
+	auto command = std::make_unique<PersistDirtyCommand>();
+	auto scope = explicit_command_list ? explicit_command_list->scope : pre_command_list->scope;
+	if (!command->target.ParseTarget(val->c_str(), true, ini_namespace, scope, true, false) ||
+		(command->target.type != ResourceCopyTargetType::CUSTOM_RESOURCE && command->target.type != ResourceCopyTargetType::POOL) ||
+		command->target.evaluation_mode != ResourceCopyTargetEvaluationMode::RESOURCE)
+		return false;
+	return AddCommandToList(command.release(), explicit_command_list, NULL,
+		pre_command_list, post_command_list, section, key, val);
+}
+
 static bool ParseResetPerFrameLimits(const wchar_t *section,
 		const wchar_t *key, wstring *val,
 		CommandList *explicit_command_list,
@@ -1283,6 +1310,8 @@ bool ParseCommandListGeneralCommands(const wchar_t *section,
 {
 	if (!wcscmp(key, L"checktextureoverride"))
 		return ParseCheckTextureOverride(section, key, val, explicit_command_list, pre_command_list, post_command_list, ini_namespace);
+	if (!wcscmp(key, L"persist_dirty"))
+		return ParsePersistDirty(section, key, val, explicit_command_list, pre_command_list, post_command_list, ini_namespace);
 
 	if (!wcscmp(key, L"run")) {
 		if (!wcsncmp(val->c_str(), L"customshader", 12) || !wcsncmp(val->c_str(), L"builtincustomshader", 19))
@@ -1631,30 +1660,36 @@ void DrawCommand::run(CommandListState *state)
 		case DrawCommandType::DRAW:
 			eval_args(2, eargs, state);
 			COMMAND_LIST_LOG(state, "[%S] Draw(%u, %u)\n", ini_section.c_str(), eargs[0], eargs[1]);
+			ResourcePersistOutputs(mOrigContext1, false);
 			mOrigContext1->Draw(eargs[0], eargs[1]);
 			break;
 		case DrawCommandType::DRAW_AUTO:
 			COMMAND_LIST_LOG(state, "[%S] DrawAuto()\n", ini_section.c_str());
+			ResourcePersistOutputs(mOrigContext1, false);
 			mOrigContext1->DrawAuto();
 			break;
 		case DrawCommandType::DRAW_INDEXED:
 			eval_args(3, eargs, state);
 			COMMAND_LIST_LOG(state, "[%S] DrawIndexed(%u, %u, %i)\n", ini_section.c_str(), eargs[0], eargs[1], (INT)eargs[2]);
+			ResourcePersistOutputs(mOrigContext1, false);
 			mOrigContext1->DrawIndexed(eargs[0], eargs[1], (INT)eargs[2]);
 			break;
 		case DrawCommandType::DRAW_INDEXED_INSTANCED:
 			eval_args(5, eargs, state);
 			COMMAND_LIST_LOG(state, "[%S] DrawIndexedInstanced(%u, %u, %u, %i, %u)\n", ini_section.c_str(), eargs[0], eargs[1], eargs[2], (INT)eargs[3], eargs[4]);
+			ResourcePersistOutputs(mOrigContext1, false);
 			mOrigContext1->DrawIndexedInstanced(eargs[0], eargs[1], eargs[2], (INT)eargs[3], eargs[4]);
 			break;
 		case DrawCommandType::DRAW_INSTANCED:
 			eval_args(4, eargs, state);
 			COMMAND_LIST_LOG(state, "[%S] DrawInstanced(%u, %u, %u, %u)\n", ini_section.c_str(), eargs[0], eargs[1], eargs[2], eargs[3]);
+			ResourcePersistOutputs(mOrigContext1, false);
 			mOrigContext1->DrawInstanced(eargs[0], eargs[1], eargs[2], eargs[3]);
 			break;
 		case DrawCommandType::DISPATCH:
 			eval_args(3, eargs, state);
 			COMMAND_LIST_LOG(state, "[%S] Dispatch(%u, %u, %u)\n", ini_section.c_str(), eargs[0], eargs[1], eargs[2]);
+			ResourcePersistOutputs(mOrigContext1, true);
 			mOrigContext1->Dispatch(eargs[0], eargs[1], eargs[2]);
 			break;
 		case DrawCommandType::DRAW_INDEXED_INSTANCED_INDIRECT:
@@ -1674,18 +1709,22 @@ void DrawCommand::run(CommandListState *state)
 			switch (info->type) {
 				case DrawCall::DrawIndexedInstanced:
 					COMMAND_LIST_LOG(state, "[%S] Draw = from_caller -> DrawIndexedInstanced(%u, %u, %u, %i, %u)\n", ini_section.c_str(), info->IndexCount, info->InstanceCount, info->FirstIndex, info->FirstVertex, info->FirstInstance);
+					ResourcePersistOutputs(mOrigContext1, false);
 					mOrigContext1->DrawIndexedInstanced(info->IndexCount, info->InstanceCount, info->FirstIndex, info->FirstVertex, info->FirstInstance);
 					break;
 				case DrawCall::DrawInstanced:
 					COMMAND_LIST_LOG(state, "[%S] Draw = from_caller -> DrawInstanced(%u, %u, %u, %u)\n", ini_section.c_str(), info->VertexCount, info->InstanceCount, info->FirstVertex, info->FirstInstance);
+					ResourcePersistOutputs(mOrigContext1, false);
 					mOrigContext1->DrawInstanced(info->VertexCount, info->InstanceCount, info->FirstVertex, info->FirstInstance);
 					break;
 				case DrawCall::DrawIndexed:
 					COMMAND_LIST_LOG(state, "[%S] Draw = from_caller -> DrawIndexed(%u, %u, %i)\n", ini_section.c_str(), info->IndexCount, info->FirstIndex, info->FirstVertex);
+					ResourcePersistOutputs(mOrigContext1, false);
 					mOrigContext1->DrawIndexed(info->IndexCount, info->FirstIndex, info->FirstVertex);
 					break;
 				case DrawCall::Draw:
 					COMMAND_LIST_LOG(state, "[%S] Draw = from_caller -> Draw(%u, %u)\n", ini_section.c_str(), info->VertexCount, info->FirstVertex);
+					ResourcePersistOutputs(mOrigContext1, false);
 					mOrigContext1->Draw(info->VertexCount, info->FirstVertex);
 					break;
 				case DrawCall::DrawInstancedIndirect:
@@ -1694,6 +1733,7 @@ void DrawCommand::run(CommandListState *state)
 						break;
 					}
 					COMMAND_LIST_LOG(state, "[%S] Draw = from_caller -> DrawInstancedIndirect(0x%p, %u)\n", ini_section.c_str(), *info->indirect_buffer, info->args_offset);
+					ResourcePersistOutputs(mOrigContext1, false);
 					mOrigContext1->DrawInstancedIndirect(*info->indirect_buffer, info->args_offset);
 					break;
 				case DrawCall::DrawIndexedInstancedIndirect:
@@ -1702,6 +1742,7 @@ void DrawCommand::run(CommandListState *state)
 						break;
 					}
 					COMMAND_LIST_LOG(state, "[%S] Draw = from_caller -> DrawIndexedInstancedIndirect(0x%p, %u)\n", ini_section.c_str(), *info->indirect_buffer, info->args_offset);
+					ResourcePersistOutputs(mOrigContext1, false);
 					mOrigContext1->DrawIndexedInstancedIndirect(*info->indirect_buffer, info->args_offset);
 					break;
 				case DrawCall::DispatchIndirect:
@@ -1710,14 +1751,17 @@ void DrawCommand::run(CommandListState *state)
 						break;
 					}
 					COMMAND_LIST_LOG(state, "[%S] Draw = from_caller -> DispatchIndirect(0x%p, %u)\n", ini_section.c_str(), *info->indirect_buffer, info->args_offset);
+					ResourcePersistOutputs(mOrigContext1, true);
 					mOrigContext1->DispatchIndirect(*info->indirect_buffer, info->args_offset);
 					break;
 				case DrawCall::Dispatch:
 					COMMAND_LIST_LOG(state, "[%S] Draw = from_caller -> Dispatch(%u, %u, %u)\n", ini_section.c_str(), info->ThreadGroupCountX, info->ThreadGroupCountY, info->ThreadGroupCountZ);
+					ResourcePersistOutputs(mOrigContext1, true);
 					mOrigContext1->Dispatch(info->ThreadGroupCountX, info->ThreadGroupCountY, info->ThreadGroupCountZ);
 					break;
 				case DrawCall::DrawAuto:
 					COMMAND_LIST_LOG(state, "[%S] Draw = from_caller -> DrawAuto()\n", ini_section.c_str());
+					ResourcePersistOutputs(mOrigContext1, false);
 					mOrigContext1->DrawAuto();
 					break;
 				default:
@@ -1729,7 +1773,10 @@ void DrawCommand::run(CommandListState *state)
 			auto_count = get_vertex_count_from_current_vb(mOrigContext1);
 			COMMAND_LIST_LOG(state, "[%S] draw = auto -> Draw(%u, 0)\n", ini_section.c_str(), auto_count);
 			if (auto_count)
+			{
+				ResourcePersistOutputs(mOrigContext1, false);
 				mOrigContext1->Draw(auto_count, 0);
+			}
 			else
 				COMMAND_LIST_LOG(state, "  Unable to determine vertex count\n");
 			break;
@@ -1737,7 +1784,10 @@ void DrawCommand::run(CommandListState *state)
 			auto_count = get_index_count_from_current_ib(mOrigContext1);
 			COMMAND_LIST_LOG(state, "[%S] drawindexed = auto -> DrawIndexed(%u, 0, 0)\n", ini_section.c_str(), auto_count);
 			if (auto_count)
+			{
+				ResourcePersistOutputs(mOrigContext1, false);
 				mOrigContext1->DrawIndexed(auto_count, 0, 0);
+			}
 			else
 				COMMAND_LIST_LOG(state, "  Unable to determine index count\n");
 			break;
@@ -1749,7 +1799,10 @@ void DrawCommand::run(CommandListState *state)
 			auto_count = get_index_count_from_current_ib(mOrigContext1);
 			COMMAND_LIST_LOG(state, "[%S] drawindexedinstanced = auto -> DrawIndexedInstanced(%u, %u, 0, 0, %u)\n", ini_section.c_str(), auto_count, info->InstanceCount, info->FirstInstance);
 			if (auto_count)
+			{
+				ResourcePersistOutputs(mOrigContext1, false);
 				mOrigContext1->DrawIndexedInstanced(auto_count, info->InstanceCount, 0, 0, info->FirstInstance);
+			}
 			else
 				COMMAND_LIST_LOG(state, "  Unable to determine index count\n");
 			break;
@@ -6435,6 +6488,7 @@ void CustomResource::Substantiate(ID3D11Device *mOrigDevice1,
 	// required and cannot be deduced at parse time.
 	this->bind_flags = (D3D11_BIND_FLAG)(this->bind_flags | bind_flags);
 	this->misc_flags = (D3D11_RESOURCE_MISC_FLAG)(this->misc_flags | misc_flags);
+	if (ResourcePersistRestore(this, mOrigDevice1)) return;
 
 	// If the resource section has enough information to create a resource
 	// we do so the first time it is loaded from. The reason we do it this
@@ -6468,6 +6522,7 @@ void CustomResource::Substantiate(ID3D11Device *mOrigDevice1,
 	}
 
 	UnlockResourceCreationMode();
+	ResourcePersistObserve(this);
 }
 
 void CustomResource::LoadBufferFromFile(ID3D11Device *mOrigDevice1)
@@ -7043,6 +7098,7 @@ static ID3D11Resource * inter_device_resource_transfer(ID3D11Device *dst_dev, ID
 			reason = "Error mapping source staging Buffer\n";
 			if (FAILED(src_ctx->Map(stg_res, index, D3D11_MAP_READ, 0, &src_map)))
 				goto err;
+			ResourcePersistWrite(dst_ctx, dst_res);
 			dst_ctx->UpdateSubresource(dst_res, index, NULL, src_map.pData, src_map.RowPitch, src_map.DepthPitch);
 			src_ctx->Unmap(stg_res, index);
 			break;
@@ -7097,6 +7153,7 @@ static ID3D11Resource * inter_device_resource_transfer(ID3D11Device *dst_dev, ID
 					reason = "Error mapping source staging Texture1D\n";
 					if (FAILED(src_ctx->Map(stg_res, index, D3D11_MAP_READ, 0, &src_map)))
 						goto err;
+					ResourcePersistWrite(dst_ctx, dst_res);
 					dst_ctx->UpdateSubresource(dst_res, index, NULL, src_map.pData, src_map.RowPitch, src_map.DepthPitch);
 					src_ctx->Unmap(stg_res, index);
 				}
@@ -7161,6 +7218,7 @@ static ID3D11Resource * inter_device_resource_transfer(ID3D11Device *dst_dev, ID
 					reason = "Error mapping source staging Texture2D\n";
 					if (FAILED(src_ctx->Map(stg_res, index, D3D11_MAP_READ, 0, &src_map)))
 						goto err;
+					ResourcePersistWrite(dst_ctx, dst_res);
 					dst_ctx->UpdateSubresource(dst_res, index, NULL, src_map.pData, src_map.RowPitch, src_map.DepthPitch);
 					src_ctx->Unmap(stg_res, index);
 				}
@@ -7204,6 +7262,7 @@ static ID3D11Resource * inter_device_resource_transfer(ID3D11Device *dst_dev, ID
 				reason = "Error mapping source staging Texture3D\n";
 				if (FAILED(src_ctx->Map(stg_res, index, D3D11_MAP_READ, 0, &src_map)))
 					goto err;
+				ResourcePersistWrite(dst_ctx, dst_res);
 				dst_ctx->UpdateSubresource(dst_res, index, NULL, src_map.pData, src_map.RowPitch, src_map.DepthPitch);
 				src_ctx->Unmap(stg_res, index);
 			}
@@ -7273,6 +7332,7 @@ void CustomResource::expire(ID3D11Device *mOrigDevice1, ID3D11DeviceContext *mOr
 	if (new_resource) {
 		// Inter-device copy succeeded, switch to the new resource:
 		resource = new_resource;
+		ResourcePersistObserve(this);
 		device = mOrigDevice1;
 		substantiated = true;
 	}
@@ -7613,6 +7673,8 @@ bool CustomResourcePool::SetSourcePool(CustomResourcePool* src)
 	}
 
 	source_pool = root;
+	if (resource_template && resource_template->persist)
+		LogWarningW(L"ResourcePersist: reference pool persistence is unsupported: %ls (leave persist disabled)\n", name.c_str());
 	return true;
 }
 
@@ -7706,6 +7768,9 @@ void CustomResourcePool::InitializeResource(size_t pool_index)
 	}
 
 	element.resource->CopyMetadataFrom(*resource_template);
+	ResourcePersistConfigure(element.resource, resource_template->persist_owner,
+		resource_template->persist_path, resource_template->persist, resource_template->debug_dump);
+	element.resource->persist_declaration = resource_template->persist_declaration;
 }
 
 void CustomResourcePool::InitializeVariable(size_t pool_index)
@@ -7772,6 +7837,11 @@ void CustomResourcePool::ResetResource(CustomResource* custom_resource)
 	custom_resource->format = DXGI_FORMAT_UNKNOWN;
 	custom_resource->buf_size = 0;
 	custom_resource->is_null = true;
+	if (custom_resource->persist) {
+		custom_resource->persist_null = true;
+		custom_resource->persist_checked = true;
+		custom_resource->substantiated = true;
+	}
 }
 
 void CustomResourcePool::ResetVariable(CommandListVariable* variable)
@@ -10149,6 +10219,12 @@ void ResourceCopyTarget::SetResource(
 	case ResourceCopyTargetType::CUSTOM_RESOURCE:
 	{
 		CustomResource* custom_resource = GetCustomResource(state, true);
+		// An explicit assignment wins over lazy disk restoration, including null.
+		if (custom_resource->persist) {
+			custom_resource->persist_checked = true;
+			custom_resource->persist_null = res == nullptr && view == nullptr;
+			custom_resource->substantiated = true;
+		}
 
 		custom_resource->stride = stride;
 		custom_resource->offset = offset;
@@ -10185,6 +10261,7 @@ void ResourceCopyTarget::SetResource(
 			if (custom_resource->resource)
 				custom_resource->resource->AddRef();
 		}
+		ResourcePersistObserve(custom_resource);
 		break;
 	}
 	case ResourceCopyTargetType::THIS_RESOURCE:
@@ -12117,6 +12194,7 @@ static void ResolveMSAA(ID3D11Resource *dst_resource, ID3D11Resource *src_resour
 	for (item = 0; item < desc.ArraySize; item++) {
 		for (level = 0; level < desc.MipLevels; level++) {
 			index = D3D11CalcSubresource(level, item, max(desc.MipLevels, 1));
+			ResourcePersistWrite(state->mOrigContext1, dst);
 			state->mOrigContext1->ResolveSubresource(dst, index, src, index, fmt);
 		}
 	}
@@ -12147,6 +12225,8 @@ static void SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource 
 	src_box.bottom = 1;
 	src_box.front = 0;
 	src_box.back = 1;
+
+	ResourcePersistWrite(state->mOrigContext1, dst_resource);
 
 	state->mOrigContext1->CopySubresourceRegion(dst_resource, 0, 0, 0, 0, src_resource, 0, &src_box);
 
@@ -12276,6 +12356,7 @@ void ClearViewCommand::clear_unknown_view(ID3D11View *view, CommandListState *st
 	if (rtv) {
 		COMMAND_LIST_LOG(state, "  clearing RTV\n");
 		Profiling::views_cleared++;
+		ResourcePersistWriteView(state->mOrigContext1, rtv);
 		state->mOrigContext1->ClearRenderTargetView(rtv, fval);
 	}
 	if (dsv) {
@@ -12290,6 +12371,8 @@ void ClearViewCommand::clear_unknown_view(ID3D11View *view, CommandListState *st
 		else if (clear_stencil)
 			flags = D3D11_CLEAR_STENCIL;
 
+		ResourcePersistWriteView(state->mOrigContext1, dsv);
+
 		state->mOrigContext1->ClearDepthStencilView(dsv, flags, dsv_depth, dsv_stencil);
 	}
 	if (uav) {
@@ -12300,9 +12383,11 @@ void ClearViewCommand::clear_unknown_view(ID3D11View *view, CommandListState *st
 		// unless the user specificially told us to use the int clear.
 		if (clear_uav_uint || !UAVSupportsFloatClear(uav)) {
 			COMMAND_LIST_LOG(state, "  clearing UAV (uint)\n");
+			ResourcePersistWriteView(state->mOrigContext1, uav);
 			state->mOrigContext1->ClearUnorderedAccessViewUint(uav, uval);
 		} else {
 			COMMAND_LIST_LOG(state, "  clearing UAV (float)\n");
+			ResourcePersistWriteView(state->mOrigContext1, uav);
 			state->mOrigContext1->ClearUnorderedAccessViewFloat(uav, fval);
 		}
 		Profiling::views_cleared++;
@@ -12560,6 +12645,7 @@ void ResourceCopyOperation::CopyResourceToResource(
 			Profiling::resource_full_copies++;
 			if (G->cache_resource_data != DataCacheBindFlags::INVALID && dst_custom_resource)
 				dst_custom_resource->SetHandleInfo(src_resource, 0, buf_dst_size);
+			ResourcePersistWrite(state->mOrigContext1, dst_resource);
 			state->mOrigContext1->CopyResource(dst_resource, src_resource);
 		}
 	} else {

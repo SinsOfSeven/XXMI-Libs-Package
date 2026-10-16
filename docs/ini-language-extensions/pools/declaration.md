@@ -264,3 +264,28 @@ pool_persist_variables = 1
 Persistence is only supported for `ring` pools. Only elements that have been initialized are saved, so with lazy initialization a variable that was never accessed is not written to `d3dx_user.ini`.
 
 See [Variables](variables.md) for more details.
+
+### Resource Persistence
+
+`persist = true` saves resource elements to a resource cache. It is independent
+of `pool_persist_variables`, which continues saving variable values to
+`d3dx_user.ini` with its existing `ring` restriction.
+
+```ini
+[PoolComputed]
+pool_size = 8
+pool_element_type_switch_reset = false
+persist = true
+pool_persist_variables = true
+debug_dump = true
+```
+
+Resource restoration preserves mixed elements' variable values. Variable-only
+activity does not create GPU payloads. Resource slots and FIFO/spatial addressing
+are restored without saving variable values a second time. Changing the pool size
+or index type rejects its old resource snapshot.
+
+Reference/proxy pool persistence is currently unsupported; leave `persist`
+disabled on those pools. See [resource persistence](../resources/resource-options.md#persist-and-debug_dump)
+for cache locations, implicit dirty tracking, optional `persist_dirty`, supported
+resource dimensions and save checkpoints.
