@@ -3,6 +3,7 @@
 #include "CommandList.h"
 
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -90,7 +91,7 @@ typedef std::set<std::string> ShaderRegexModels;
 
 class ShaderRegexPattern {
 public:
-	pcre2_code *regex;
+	std::shared_ptr<pcre2_code> regex;
 	std::string replace;
 
 	bool do_replace;
@@ -102,13 +103,18 @@ public:
 	std::set<std::string> named_capture_groups;
 
 	ShaderRegexPattern();
-	~ShaderRegexPattern();
 
 	bool compile(std::string *pattern);
 	bool named_group_overlaps(ShaderRegexTemps &other_set);
 	bool matches(std::string *asm_text);
 	bool patch(std::string *asm_text, ShaderRegexTemps *temp_regs, unsigned dcl_temps);
 };
+
+// Keep compiled PCRE2 programs alive across INI reloads when their pattern
+// text and compile options are unchanged. Call around ShaderRegex parsing so
+// entries no longer referenced by the new configuration can be released.
+void begin_shader_regex_compile_cache_reload();
+void finish_shader_regex_compile_cache_reload();
 
 // These are sorted to make sure we get consistent results between runs
 // in case the user does something that winds up depending on the order:
