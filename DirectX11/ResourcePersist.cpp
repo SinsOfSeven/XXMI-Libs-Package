@@ -566,20 +566,12 @@ static bool RestoreResource(CustomResource *r, ID3D11Device *device)
     case 4: { ComPtr<ID3D11DepthStencilView> v; hr = device->CreateDepthStencilView(resource.Get(), &saved.view.dsv, &v); view = v; break; }
     }
     if (FAILED(hr)) return false;
-    std::unique_ptr<ResourceHandleInfo> info;
-    if (saved.desc.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-        info = std::make_unique<ResourceHandleInfo>();
-        info->type = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
-        info->desc2D = saved.desc.tex2; info->texture_hashes_dirty = true;
-    }
     r->resource = resource.Detach(); r->view = view.Detach(); r->device = device;
     r->stride = saved.stride; r->source_stride = saved.source_stride;
     r->offset = saved.region_offset; r->buf_size = saved.buf_size; r->format = saved.format;
     r->is_null = false; r->substantiated = true;
-    if (info) {
-        r->handle_info = std::move(info);
-        RegisterCustomTextureMipHashCache(r->resource, r->handle_info.get());
-    }
+    // Rebuild cached metadata on demand for the newly restored resource.
+    r->handle_info.reset();
     ResourcePersistObserve(r);
     store.live[r->name] = {saved, r->resource, WriteGeneration(r->resource)};
     LogInfoW(L"ResourcePersist: restored %ls (%u bytes)\n", r->name.c_str(), saved.size);
