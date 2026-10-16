@@ -135,9 +135,8 @@ Within these sections two pseudo-resources expose the arguments of the current c
 * `copy_dst` — the destination resource of the `CopyResource()`/`CopySubresourceRegion()` call.
 * `copy_src` — the source resource of the call.
 
-They can be read like any other resource target (e.g. `ResourceB = ref copy_dst`) or written
-(i.e. assigned) to **redirect** the actual copy, since the hook passes the local parameter
-pointers through to the command list:
+They can be read like any other resource target (e.g. `ResourceB = ref copy_dst`). Assigning
+one in the pre command list redirects the copy by replacing that local argument:
 
 ```ini
 [CopyResource]
@@ -145,8 +144,12 @@ pointers through to the command list:
 copy_dst = ref MyRes
 ```
 
-Both handles are only meaningful while a `[CopyResource]` command list is running; using them in
-any other context resolves to `null` (and logs an error), following the same rules as `this`.
+Assigning either target in a `post ` command runs after the game's copy and cannot redirect that
+copy. Both handles are only meaningful while a `[CopyResource]` command list is running; using
+them in any other context resolves to `null` (and logs an error), following the same rules as `this`.
 
 Because the game's own references to those resources remain valid during the call, redirecting
 does not leak.
+
+The hook holds references to the current source and destination until the call returns, including
+when a command list replaces either resource.
