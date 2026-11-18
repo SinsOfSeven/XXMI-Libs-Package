@@ -851,47 +851,176 @@ public:
 // we'll hold off until post 1.3 since the FrameAnalysisOptions needs to go in
 // FrameAnalysis.h to make that work, and that is an area that diverged from 1.2:
 struct TextureOverride;
+class CustomResource;
 
-class FuzzyMatchResourceDesc {
-private:
-	template <typename DescType>
-	bool check_common_resource_fields(const DescType *desc) const;
-	template <typename DescType>
-	bool check_common_texture_fields(const DescType *desc) const;
+// A single filterable field on a resource. A FilterField collects every
+// constraint written for it (joined with '&'), and every constraint must pass
+// for the field to match. This allows lower & upper bounds on the same field
+// (e.g. match_height = >100 & <500) in both [Filter<Name>] and fuzzy
+// [TextureOverride] sections.
+class FilterField {
 public:
-	struct TextureOverride *texture_override;
+	bool empty() const { return values.empty(); }
+	void add(const FuzzyMatch &m) { values.push_back(m); }
+	const std::vector<FuzzyMatch> &constraints() const { return values; }
 
-	bool matches_buffer;
-	bool matches_tex1d;
-	bool matches_tex2d;
-	bool matches_tex3d;
+	// True if the field has exactly one plain `= value` constraint, and stores
+	// that value. This is the only form the draw info fast-path maps can index
+	// on (see BuildTextureOverrideDrawMaps), so anything else must fall back to
+	// scanning the overrides.
+	bool single_equal_value(UINT *out) const
+	{
+		if (values.size() != 1)
+			return false;
 
-	// TODO: Consider making this a vector we iterate over so we only
-	// process tests specified in this texture override
-	FuzzyMatch Usage;               // Common
-	FuzzyMatch BindFlags;           // Common
-	FuzzyMatch CPUAccessFlags;      // Common
-	FuzzyMatch MiscFlags;           // Common
-	FuzzyMatch ByteWidth;           // Buffer+StructuredBuffer
-	FuzzyMatch StructureByteStride; //        StructuredBuffer XXX: I think I may have seen this later set to 0 if it was initially set on a regular buffer?
-	FuzzyMatch MipLevels;           // 1D+2D+3D XXX: Need to check what happens for resources created with mips=0 and mips generated later
-	FuzzyMatch Format;              // 1D+2D+3D
-	FuzzyMatch Width;               // 1D+2D+3D
-	FuzzyMatch Height;              //    2D+3D
-	FuzzyMatch Depth;               //       3D
-	FuzzyMatch ArraySize;           // 1D+2D
-	FuzzyMatch SampleDesc_Count;    //    2D
-	FuzzyMatch SampleDesc_Quality;  //    2D    XXX Can anything change here if count=1?
+		const FuzzyMatch &m = values.front();
+		if (m.op != FuzzyMatchOp::EQUAL || m.rhs_type1 != FuzzyMatchOperandType::VALUE)
+			return false;
 
-	FuzzyMatchResourceDesc(std::wstring section);
-	~FuzzyMatchResourceDesc();
-	bool matches(const D3D11_BUFFER_DESC *desc) const;
-	bool matches(const D3D11_TEXTURE1D_DESC *desc) const;
-	bool matches(const D3D11_TEXTURE2D_DESC *desc) const;
-	bool matches(const D3D11_TEXTURE3D_DESC *desc) const;
+		*out = m.val;
+		return true;
+	}
+
+	// Matches the field value against a typed resource description. NOTE: Only
+	// safe to instantiate in translation units where FuzzyMatch::matches is
+	// defined (i.e. ResourceHash.cpp), so keep the call sites of these out of
+	// other files - use the concrete FilterMatch::matches() overloads instead.
+	template <typename DescType>
+	bool matches(UINT lhs, const DescType *desc) const
+	{
+		for (const FuzzyMatch &m : values) {
+			if (!m.matches(lhs, desc))
+				return false;
+		}
+		return true;
+	}
+
+	// Matches the field value directly (draw context fields, where the RHS of
+	// every constraint must be a literal value).
+	bool matches_uint(UINT lhs) const
+	{
+		for (const FuzzyMatch &m : values) {
+			if (!m.matches_uint(lhs))
+				return false;
+		}
+		return true;
+	}
+private:
+	std::vector<FuzzyMatch> values;
+};
+
+// A set of constraints on resource descriptions (and optionally the draw
+// context) that can be evaluated against a live D3D11 resource or the declared
+// fields of a custom resource. Used by [Filter<Name>] sections (via
+// `->Match(<expression>)`) and, after unification, by fuzzy [TextureOverride]
+// match conditions.
+class FilterMatch {
+public:
+	bool matches_buffer = true;
+	bool matches_tex1d = true;
+	bool matches_tex2d = true;
+	bool matches_tex3d = true;
+
+	FilterField Usage;               // Common
+	FilterField BindFlags;           // Common
+	FilterField CPUAccessFlags;      // Common
+	FilterField MiscFlags;           // Common
+	FilterField ByteWidth;           // Buffer+StructuredBuffer
+	FilterField StructureByteStride; // StructuredBuffer
+	FilterField MipLevels;           // 1D+2D+3D
+	FilterField Format;              // 1D+2D+3D
+	FilterField Width;               // 1D+2D+3D
+	FilterField Height;              //    2D+3D
+	FilterField Depth;               //       3D
+	FilterField ArraySize;           // 1D+2D
+	FilterField SampleDesc_Count;    //    2D
+	FilterField SampleDesc_Quality;  //    2D
+
+	// Draw context fields, evaluated against the DrawCallInfo of the current
+	// command list run (e.g. match_index_count = >6):
+	FilterField FirstVertex;
+	FilterField FirstIndex;
+	FilterField FirstInstance;
+	FilterField VertexCount;
+	FilterField IndexCount;
+	FilterField InstanceCount;
+
+	FilterMatch() = default;
+	bool matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const CustomResource *resource, const DrawCallInfo *call_info) const;
+
+	// Description-only match, ignoring any draw context conditions. Used to
+	// build the per-resource fuzzy candidate cache, which is filtered per draw
+	// with matches_draw_conditions() afterwards:
+	bool matches_desc(const D3D11_BUFFER_DESC *desc) const;
+	bool matches_desc(const D3D11_TEXTURE1D_DESC *desc) const;
+	bool matches_desc(const D3D11_TEXTURE2D_DESC *desc) const;
+	bool matches_desc(const D3D11_TEXTURE3D_DESC *desc) const;
 
 	void set_resource_type(D3D11_RESOURCE_DIMENSION type);
 	bool update_types_matched();
+
+	// True if any draw context field is constrained.
+	bool has_draw_conditions() const;
+	// Evaluates the draw context fields against the current draw call. Returns
+	// true when there are no draw conditions at all.
+	bool matches_draw_conditions(const DrawCallInfo *call_info) const;
+};
+
+// Composes [Filter<Name>] sections with the boolean operators accepted inside
+// the `->Match(<expression>)` member:
+//
+//   !   NOT   (prefix, highest precedence)
+//   &   AND
+//   ^   XOR
+//   |   OR    (lowest precedence)
+//
+// Operands are filter names (resolved to named ResourceFilters) or raw 8/16-hex
+// hash literals.
+enum class FilterExprOp {
+	LEAF,
+	HASH,
+	AND,
+	OR,
+	XOR,
+	NOT,
+};
+
+class FilterExpr {
+public:
+	FilterExprOp op = FilterExprOp::LEAF;
+
+	// Set for LEAF: points to the named filter's match criteria.
+	const FilterMatch *leaf = nullptr;
+
+	// Set for HASH: a raw resource/texture hash literal.
+	uint64_t hash = 0;
+
+	// Set for AND/OR/XOR (one or more children) and NOT (exactly one child).
+	std::vector<std::shared_ptr<const FilterExpr>> children;
+
+	// True if any leaf in this tree is a HASH literal.
+	bool has_hash = false;
+
+	bool matches(const uint64_t *resource_hash, const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const uint64_t *resource_hash, const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
+	bool matches(const uint64_t *resource_hash, const CustomResource *resource, const DrawCallInfo *call_info) const;
+};
+
+// A thin owner for a fuzzy [TextureOverride]. All match state lives in
+// TextureOverride::filter (a FilterMatch), so this type only exists to keep the
+// owning pointer used by G->mFuzzyTextureOverrides (and its sorted set) stable.
+class FuzzyMatchResourceDesc {
+public:
+	struct TextureOverride *texture_override;
+
+	FuzzyMatchResourceDesc(std::wstring section);
+	~FuzzyMatchResourceDesc();
 };
 bool TextureOverrideLess(const struct TextureOverride &lhs, const struct TextureOverride &rhs);
 struct FuzzyMatchResourceDescLess {

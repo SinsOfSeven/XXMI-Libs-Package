@@ -13,6 +13,8 @@
 #include "DirectXTK/Src/PlatformHelpers.h"
 #include "DirectXTK/Src/LoaderHelpers.h"
 
+#include "CommandList.h"
+
 // Overloaded functions to log any kind of resource description (useful to call
 // from templates):
 
@@ -1741,25 +1743,41 @@ bool FuzzyMatch::matches_common(UINT lhs, UINT effective) const
 	return false;
 }
 
-FuzzyMatchResourceDesc::FuzzyMatchResourceDesc(std::wstring section) :
-	matches_buffer(true),
-	matches_tex1d(true),
-	matches_tex2d(true),
-	matches_tex3d(true)
+bool FilterMatch::has_draw_conditions() const
 {
-	// TODO: Statically contain this once we sort out our header files:
-	texture_override = new TextureOverride();
-	texture_override->ini_section = section;
+	return !FirstVertex.empty() || !FirstIndex.empty() || !FirstInstance.empty()
+	    || !VertexCount.empty() || !IndexCount.empty() || !InstanceCount.empty();
 }
 
-FuzzyMatchResourceDesc::~FuzzyMatchResourceDesc()
+bool FilterMatch::matches_draw_conditions(const DrawCallInfo *call_info) const
 {
-	delete texture_override;
+	if (!has_draw_conditions())
+		return true;
+
+	if (!call_info)
+		return false;
+
+	if (!FirstVertex.matches_uint(call_info->FirstVertex))
+		return false;
+	if (!FirstIndex.matches_uint(call_info->FirstIndex))
+		return false;
+	if (!FirstInstance.matches_uint(call_info->FirstInstance))
+		return false;
+	if (!VertexCount.matches_uint(call_info->VertexCount))
+		return false;
+	if (!IndexCount.matches_uint(call_info->IndexCount))
+		return false;
+	if (!InstanceCount.matches_uint(call_info->InstanceCount))
+		return false;
+
+	return true;
 }
 
-template <typename DescType>
-bool FuzzyMatchResourceDesc::check_common_resource_fields(const DescType *desc) const
+bool FilterMatch::matches_desc(const D3D11_BUFFER_DESC *desc) const
 {
+	if (!matches_buffer)
+		return false;
+
 	if (!Usage.matches(desc->Usage, desc))
 		return false;
 	if (!BindFlags.matches(desc->BindFlags, desc))
@@ -1768,29 +1786,6 @@ bool FuzzyMatchResourceDesc::check_common_resource_fields(const DescType *desc) 
 		return false;
 	if (!MiscFlags.matches(desc->MiscFlags, desc))
 		return false;
-	return true;
-}
-
-template <typename DescType>
-bool FuzzyMatchResourceDesc::check_common_texture_fields(const DescType *desc) const
-{
-	if (!MipLevels.matches(desc->MipLevels, desc))
-		return false;
-	if (!Format.matches(desc->Format, desc))
-		return false;
-	if (!Width.matches(desc->Width, desc))
-		return false;
-	return true;
-}
-
-bool FuzzyMatchResourceDesc::matches(const D3D11_BUFFER_DESC *desc) const
-{
-	if (!matches_buffer)
-		return false;
-
-	if (!check_common_resource_fields(desc))
-		return false;
-
 	if (!ByteWidth.matches(desc->ByteWidth, desc))
 		return false;
 	if (!StructureByteStride.matches(desc->StructureByteStride, desc))
@@ -1798,31 +1793,49 @@ bool FuzzyMatchResourceDesc::matches(const D3D11_BUFFER_DESC *desc) const
 	return true;
 }
 
-bool FuzzyMatchResourceDesc::matches(const D3D11_TEXTURE1D_DESC *desc) const
+bool FilterMatch::matches_desc(const D3D11_TEXTURE1D_DESC *desc) const
 {
 	if (!matches_tex1d)
 		return false;
 
-	if (!check_common_resource_fields(desc))
+	if (!Usage.matches(desc->Usage, desc))
 		return false;
-	if (!check_common_texture_fields(desc))
+	if (!BindFlags.matches(desc->BindFlags, desc))
 		return false;
-
+	if (!CPUAccessFlags.matches(desc->CPUAccessFlags, desc))
+		return false;
+	if (!MiscFlags.matches(desc->MiscFlags, desc))
+		return false;
+	if (!MipLevels.matches(desc->MipLevels, desc))
+		return false;
+	if (!Format.matches(desc->Format, desc))
+		return false;
+	if (!Width.matches(desc->Width, desc))
+		return false;
 	if (!ArraySize.matches(desc->ArraySize, desc))
 		return false;
 	return true;
 }
 
-bool FuzzyMatchResourceDesc::matches(const D3D11_TEXTURE2D_DESC *desc) const
+bool FilterMatch::matches_desc(const D3D11_TEXTURE2D_DESC *desc) const
 {
 	if (!matches_tex2d)
 		return false;
 
-	if (!check_common_resource_fields(desc))
+	if (!Usage.matches(desc->Usage, desc))
 		return false;
-	if (!check_common_texture_fields(desc))
+	if (!BindFlags.matches(desc->BindFlags, desc))
 		return false;
-
+	if (!CPUAccessFlags.matches(desc->CPUAccessFlags, desc))
+		return false;
+	if (!MiscFlags.matches(desc->MiscFlags, desc))
+		return false;
+	if (!MipLevels.matches(desc->MipLevels, desc))
+		return false;
+	if (!Format.matches(desc->Format, desc))
+		return false;
+	if (!Width.matches(desc->Width, desc))
+		return false;
 	if (!Height.matches(desc->Height, desc))
 		return false;
 	if (!ArraySize.matches(desc->ArraySize, desc))
@@ -1834,16 +1847,25 @@ bool FuzzyMatchResourceDesc::matches(const D3D11_TEXTURE2D_DESC *desc) const
 	return true;
 }
 
-bool FuzzyMatchResourceDesc::matches(const D3D11_TEXTURE3D_DESC *desc) const
+bool FilterMatch::matches_desc(const D3D11_TEXTURE3D_DESC *desc) const
 {
 	if (!matches_tex3d)
 		return false;
 
-	if (!check_common_resource_fields(desc))
+	if (!Usage.matches(desc->Usage, desc))
 		return false;
-	if (!check_common_texture_fields(desc))
+	if (!BindFlags.matches(desc->BindFlags, desc))
 		return false;
-
+	if (!CPUAccessFlags.matches(desc->CPUAccessFlags, desc))
+		return false;
+	if (!MiscFlags.matches(desc->MiscFlags, desc))
+		return false;
+	if (!MipLevels.matches(desc->MipLevels, desc))
+		return false;
+	if (!Format.matches(desc->Format, desc))
+		return false;
+	if (!Width.matches(desc->Width, desc))
+		return false;
 	if (!Height.matches(desc->Height, desc))
 		return false;
 	if (!Depth.matches(desc->Depth, desc))
@@ -1851,7 +1873,137 @@ bool FuzzyMatchResourceDesc::matches(const D3D11_TEXTURE3D_DESC *desc) const
 	return true;
 }
 
-void FuzzyMatchResourceDesc::set_resource_type(D3D11_RESOURCE_DIMENSION type)
+bool FilterMatch::matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const
+{
+	if (!matches_draw_conditions(call_info))
+		return false;
+	return matches_desc(desc);
+}
+
+bool FilterMatch::matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const
+{
+	if (!matches_draw_conditions(call_info))
+		return false;
+	return matches_desc(desc);
+}
+
+bool FilterMatch::matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const
+{
+	if (!matches_draw_conditions(call_info))
+		return false;
+	return matches_desc(desc);
+}
+
+bool FilterMatch::matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const
+{
+	if (!matches_draw_conditions(call_info))
+		return false;
+	return matches_desc(desc);
+}
+
+// Custom resources are matched on their *declared* (override_*) fields, so a
+// filter can discriminate between resources before they are ever substantiated.
+// The declared fields are synthesised into a D3D11_DESC and matched through the
+// regular overloads above, which keeps the matching semantics identical for
+// declared and live resources.
+bool FilterMatch::matches(const CustomResource *resource, const DrawCallInfo *call_info) const
+{
+	if (!resource)
+		return false;
+
+	bool buffer;
+	bool tex1d;
+	bool tex2d;
+	bool tex3d;
+
+	switch (resource->override_type) {
+		case CustomResourceType::BUFFER:
+		case CustomResourceType::STRUCTURED_BUFFER:
+		case CustomResourceType::RAW_BUFFER:
+			buffer = true; tex1d = tex2d = tex3d = false;
+			break;
+		case CustomResourceType::TEXTURE1D:
+			buffer = tex2d = tex3d = false; tex1d = true;
+			break;
+		case CustomResourceType::TEXTURE2D:
+		case CustomResourceType::CUBE:
+			buffer = tex1d = tex3d = false; tex2d = true;
+			break;
+		case CustomResourceType::TEXTURE3D:
+			buffer = tex1d = tex2d = false; tex3d = true;
+			break;
+		default:
+			// No type declared: try every dimension the filter can match.
+			buffer = matches_buffer;
+			tex1d = matches_tex1d;
+			tex2d = matches_tex2d;
+			tex3d = matches_tex3d;
+			break;
+	}
+
+	if (buffer) {
+		D3D11_BUFFER_DESC desc;
+		memset(&desc, 0, sizeof(desc));
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = (D3D11_BIND_FLAG)resource->override_bind_flags;
+		desc.CPUAccessFlags = 0;
+		desc.MiscFlags = (D3D11_RESOURCE_MISC_FLAG)resource->override_misc_flags;
+		desc.ByteWidth = resource->override_byte_width;
+		desc.StructureByteStride = resource->override_stride;
+		if (matches(&desc, call_info))
+			return true;
+	}
+	if (tex1d) {
+		D3D11_TEXTURE1D_DESC desc;
+		memset(&desc, 0, sizeof(desc));
+		desc.Format = resource->override_format;
+		desc.Width = resource->override_width;
+		desc.MipLevels = resource->override_mips;
+		desc.ArraySize = resource->override_array;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = (D3D11_BIND_FLAG)resource->override_bind_flags;
+		desc.CPUAccessFlags = 0;
+		desc.MiscFlags = (D3D11_RESOURCE_MISC_FLAG)resource->override_misc_flags;
+		if (matches(&desc, call_info))
+			return true;
+	}
+	if (tex2d) {
+		D3D11_TEXTURE2D_DESC desc;
+		memset(&desc, 0, sizeof(desc));
+		desc.Format = resource->override_format;
+		desc.Width = resource->override_width;
+		desc.Height = resource->override_height;
+		desc.MipLevels = resource->override_mips;
+		desc.ArraySize = resource->override_array;
+		desc.SampleDesc.Count = resource->override_msaa;
+		desc.SampleDesc.Quality = resource->override_msaa_quality;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = (D3D11_BIND_FLAG)resource->override_bind_flags;
+		desc.CPUAccessFlags = 0;
+		desc.MiscFlags = (D3D11_RESOURCE_MISC_FLAG)resource->override_misc_flags;
+		if (matches(&desc, call_info))
+			return true;
+	}
+	if (tex3d) {
+		D3D11_TEXTURE3D_DESC desc;
+		memset(&desc, 0, sizeof(desc));
+		desc.Format = resource->override_format;
+		desc.Width = resource->override_width;
+		desc.Height = resource->override_height;
+		desc.Depth = resource->override_depth;
+		desc.MipLevels = resource->override_mips;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = (D3D11_BIND_FLAG)resource->override_bind_flags;
+		desc.CPUAccessFlags = 0;
+		desc.MiscFlags = (D3D11_RESOURCE_MISC_FLAG)resource->override_misc_flags;
+		if (matches(&desc, call_info))
+			return true;
+	}
+
+	return false;
+}
+
+void FilterMatch::set_resource_type(D3D11_RESOURCE_DIMENSION type)
 {
 	switch(type) {
 		case D3D11_RESOURCE_DIMENSION_BUFFER:
@@ -1869,63 +2021,111 @@ void FuzzyMatchResourceDesc::set_resource_type(D3D11_RESOURCE_DIMENSION type)
 	}
 }
 
-bool FuzzyMatchResourceDesc::update_types_matched()
+bool FilterMatch::update_types_matched()
 {
-	// This will remove the flags for types of resources we cannot match
-	// based on what fields we are matching and what resource types they
-	// apply to. We do not set a flag if it was already cleared, since the
-	// user may have already specified a specific resource type. If we are
-	// left with no possible resource types we can match we will return
-	// false so that the caller knows this is invalid.
-
-	if (FuzzyMatchOp::ALWAYS != ByteWidth.op
-	 || FuzzyMatchOp::ALWAYS != StructureByteStride.op)
+	// A field that has at least one constraint is non-empty, so a repeated key
+	// (e.g. match_height twice) still counts.
+	if (!ByteWidth.empty() || !StructureByteStride.empty())
 		matches_tex1d = matches_tex2d = matches_tex3d = false;
 
-	if (FuzzyMatchOp::ALWAYS != MipLevels.op
-	 || FuzzyMatchOp::ALWAYS != Format.op
-	 || FuzzyMatchOp::ALWAYS != Width.op)
+	if (!MipLevels.empty() || !Format.empty() || !Width.empty())
 		matches_buffer = false;
 
-	if (FuzzyMatchOp::ALWAYS != Height.op)
+	if (!Height.empty())
 		matches_buffer = matches_tex1d = false;
 
-	if (FuzzyMatchOp::ALWAYS != Depth.op)
+	if (!Depth.empty())
 		matches_buffer = matches_tex1d = matches_tex2d = false;
 
-	if (FuzzyMatchOp::ALWAYS != ArraySize.op)
+	if (!ArraySize.empty())
 		matches_buffer = matches_tex3d = false;
 
-	if (FuzzyMatchOp::ALWAYS != SampleDesc_Count.op
-	 || FuzzyMatchOp::ALWAYS != SampleDesc_Quality.op)
+	if (!SampleDesc_Count.empty() || !SampleDesc_Quality.empty())
 		matches_buffer = matches_tex1d = matches_tex3d = false;
 
 	return matches_buffer || matches_tex1d || matches_tex2d || matches_tex3d;
 }
 
-static bool matches_draw_info(TextureOverride *tex_override, DrawCallInfo *call_info)
+template <typename DescType>
+static bool filter_expr_matches(const FilterExpr &expr, const uint64_t *resource_hash, const DescType *desc, const DrawCallInfo *call_info)
 {
-	if (!tex_override->has_draw_context_match)
-		return true;
-
-	if (!call_info)
-		return false;
-
-	if (!tex_override->match_index_count.matches_uint(call_info->IndexCount))
-		return false;
-	if (!tex_override->match_first_index.matches_uint(call_info->FirstIndex))
-		return false;
-	if (!tex_override->match_vertex_count.matches_uint(call_info->VertexCount))
-		return false;
-	if (!tex_override->match_first_vertex.matches_uint(call_info->FirstVertex))
-		return false;
-	if (!tex_override->match_instance_count.matches_uint(call_info->InstanceCount))
-		return false;
-	if (!tex_override->match_first_instance.matches_uint(call_info->FirstInstance))
-		return false;
-
-	return true;
+	switch (expr.op) {
+		case FilterExprOp::LEAF:
+			return expr.leaf && expr.leaf->matches(desc, call_info);
+		case FilterExprOp::HASH:
+			if (!resource_hash)
+				return false;
+			// Raw literals may be 32-bit (8 hex) or 64-bit (16 hex). Accept
+			// a 32-bit match against either low dword for convenience.
+			return expr.hash == *resource_hash
+				|| ((expr.hash >> 32) == 0 && (uint32_t)expr.hash == (uint32_t)(*resource_hash & 0xffffffff));
+		case FilterExprOp::AND:
+			if (expr.children.empty())
+				return false;
+			for (const auto &child : expr.children) {
+				if (!child || !filter_expr_matches(*child, resource_hash, desc, call_info))
+					return false;
+			}
+			return true;
+		case FilterExprOp::OR:
+			for (const auto &child : expr.children) {
+				if (child && filter_expr_matches(*child, resource_hash, desc, call_info))
+					return true;
+			}
+			return false;
+		case FilterExprOp::XOR: {
+			bool result = false;
+			for (const auto &child : expr.children) {
+				if (child && filter_expr_matches(*child, resource_hash, desc, call_info))
+					result = !result;
+			}
+			return result;
+		}
+		case FilterExprOp::NOT:
+			return expr.children.size() == 1 && expr.children[0]
+				&& !filter_expr_matches(*expr.children[0], resource_hash, desc, call_info);
+	}
+	return false;
 }
+
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const
+{
+	return filter_expr_matches(*this, resource_hash, desc, call_info);
+}
+
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const
+{
+	return filter_expr_matches(*this, resource_hash, desc, call_info);
+}
+
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const
+{
+	return filter_expr_matches(*this, resource_hash, desc, call_info);
+}
+
+bool FilterExpr::matches(const uint64_t *resource_hash, const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const
+{
+	return filter_expr_matches(*this, resource_hash, desc, call_info);
+}
+
+bool FilterExpr::matches(const uint64_t *resource_hash, const CustomResource *resource, const DrawCallInfo *call_info) const
+{
+	return filter_expr_matches(*this, resource_hash, resource, call_info);
+}
+
+FuzzyMatchResourceDesc::FuzzyMatchResourceDesc(std::wstring section)
+{
+	// TODO: Statically contain this once we sort out our header files:
+	texture_override = new TextureOverride();
+	texture_override->ini_section = section;
+}
+
+FuzzyMatchResourceDesc::~FuzzyMatchResourceDesc()
+{
+	delete texture_override;
+}
+
+
 
 void find_texture_override_for_hash(uint32_t hash, TextureOverrideMatches *matches, DrawCallInfo *call_info)
 {
@@ -1937,7 +2137,7 @@ void find_texture_override_for_hash(uint32_t hash, TextureOverrideMatches *match
 		return;
 
 	for (j = i->second.begin(); j != i->second.end(); j++) {
-		if (matches_draw_info(&(*j), call_info))
+		if (j->filter.matches_draw_conditions(call_info))
 			matches->push_back(&(*j));
 	}
 }
@@ -1978,7 +2178,7 @@ void find_texture_overrides_by_hash_from_fuzzy_matches(uint32_t hash, TextureOve
 	TextureOverrideFuzzyMatches::iterator it;
 
 	for (it = fuzzy_matches->begin(); it != fuzzy_matches->end(); ++it) {
-		if (it->hash == hash && matches_draw_info(it->texture_override, call_info)) {
+		if (it->hash == hash && it->texture_override->filter.matches_draw_conditions(call_info)) {
 			matches->push_back(it->texture_override);
 		}
 	}
@@ -2006,7 +2206,7 @@ static void collect_fuzzy_texture_overrides_for_desc(const DescType *desc, std::
 	}
 
 	for (i = G->mFuzzyTextureOverrides.begin(); i != G->mFuzzyTextureOverrides.end(); i++) {
-		if ((*i)->matches(desc))
+		if ((*i)->texture_override->filter.matches_desc(desc))
 			out->push_back((*i)->texture_override);
 	}
 
@@ -2123,7 +2323,7 @@ void find_fuzzy_texture_overrides_for_resource(ID3D11Resource *resource, Texture
 	TextureOverrideCandidates *candidates = get_texture_override_candidates(resource);
 	if (candidates) {
 		for (TextureOverride *to : candidates->fuzzy_matches) {
-			if (matches_draw_info(to, call_info))
+			if (to->filter.matches_draw_conditions(call_info))
 				matches->push_back(to);
 		}
 	}
@@ -2150,7 +2350,8 @@ static void find_texture_overrides_for_desc(const DescType *desc, TextureOverrid
 	}
 
 	for (i = G->mFuzzyTextureOverrides.begin(); i != G->mFuzzyTextureOverrides.end(); i++) {
-		if ((*i)->matches(desc) && matches_draw_info((*i)->texture_override, call_info))
+		if ((*i)->texture_override->filter.matches_desc(desc)
+		 && (*i)->texture_override->filter.matches_draw_conditions(call_info))
 			matches->push_back((*i)->texture_override);
 	}
 
@@ -2201,12 +2402,12 @@ void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverri
 	if (candidates) {
 		if (candidates->hash_matches) {
 			for (TextureOverride &to : *candidates->hash_matches) {
-				if (matches_draw_info(&to, call_info))
+				if (to.filter.matches_draw_conditions(call_info))
 					matches->push_back(&to);
 			}
 		}
 		for (TextureOverride *to : candidates->fuzzy_matches) {
-			if (matches_draw_info(to, call_info))
+			if (to->filter.matches_draw_conditions(call_info))
 				matches->push_back(to);
 		}
 	}

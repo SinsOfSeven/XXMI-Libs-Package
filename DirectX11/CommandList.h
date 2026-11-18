@@ -559,6 +559,11 @@ public:
 	DXGI_FORMAT match_format = DXGI_FORMAT_UNKNOWN;
 	float match_confidence = 0.75f;
 
+	// Rich declarative match criteria for `->Match(<expression>)` and unified
+	// filter matching. Resolved expression leaves point at this member on the
+	// named filter in `resourceFilters`.
+	FilterMatch match;
+
 	ResourceFilter* ResolveFilter();
 	bool SetSource(ResourceFilter* source);
 	void CopyMetadataFrom(const ResourceFilter& src);
@@ -913,6 +918,9 @@ enum class ResourceCopyTargetEvaluationMode : uint32_t {
 	// PIPELINE SLOT
 	SLOT_RANGE                = 0b00010000000000000000000000000000, // ps-t[$a:$b]
 	SLOT_FILTER               = 0b00100000000000000000000000000000, // ps-t[FilterA]
+
+	// RESOURCE MATCH EXPRESSION
+	RESOURCE_FILTER           = 0b01000000000000000000000000000000, // ->Match(<expr>)
 };
 SENSIBLE_ENUM(ResourceCopyTargetEvaluationMode);
 static EnumName_t<const wchar_t*, ResourceCopyTargetEvaluationMode> ResourceCopyTargetEvaluationModeNames[] = {
@@ -931,6 +939,7 @@ static EnumName_t<const wchar_t*, ResourceCopyTargetEvaluationMode> ResourceCopy
 	{L"ResourceMips", ResourceCopyTargetEvaluationMode::RESOURCE_MIPS},
 	{L"ResourceHammingDistance", ResourceCopyTargetEvaluationMode::RESOURCE_HAMMING_DISTANCE},
 	{L"ResourceBindFlags", ResourceCopyTargetEvaluationMode::RESOURCE_BIND_FLAGS},
+	{L"ResourceFilter", ResourceCopyTargetEvaluationMode::RESOURCE_FILTER},
 
 	{L"PoolIdentity", ResourceCopyTargetEvaluationMode::POOL_IDENTITY},
 	{L"PoolSize", ResourceCopyTargetEvaluationMode::POOL_SIZE},
@@ -1103,11 +1112,17 @@ public:
 
 	ResourceFilter* slot_filter = nullptr;
 
+	// Set when the target carries a `->Match(<expression>)` member
+	// (RESOURCE_FILTER). The tree composes named filters with `!`, `&`, `^`, `|`.
+	std::shared_ptr<const FilterExpr> filter;
+
 	bool forbid_view_cache = false;
 
 	// allow_range: accept ps-t[$a:$b] / PoolFoo[$a:$b] / bare ps-t targets,
 	// only meaningful for commands that iterate the range.
-	bool ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom = true, bool allow_range = false);
+	// allow_filter: accept `->Match(<expression>)`, only meaningful in
+	// expression operand contexts.
+	bool ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom = true, bool allow_range = false, bool allow_filter = false);
 	bool IsRange() const;
 
 	// Slot for this draw, or UINT_MAX (with a warning) if a dynamic slot
@@ -1163,6 +1178,7 @@ public:
 	float GetResourceHammingDistance(CommandListState* state);
 	D3D11_BIND_FLAG GetResourceBindFlags(CommandListState *state);
 	float GetPoolElementLastFrame(CommandListState* state);
+	float EvaluateResourceFilter(CommandListState* state);
 
 	D3D11_BIND_FLAG BindFlags(CommandListState *state, D3D11_RESOURCE_MISC_FLAG *misc_flags=NULL);
 
