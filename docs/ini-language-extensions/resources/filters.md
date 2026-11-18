@@ -160,7 +160,7 @@ For description and draw-call fields, member access returns a sentinel/value:
 | Result | Meaning |
 | --- | --- |
 | `-1` | Undeclared - the field has no constraints |
-| `-2` | Declared but complex/non-singleton-literal - the field cannot be represented as a single plain literal value (for example ranges, multiple/ANDed constraints, or other non-singleton expressions) |
+| `-5` | Declared but complex/non-singleton-literal - the field cannot be represented as a single plain literal value (for example ranges, multiple/ANDed constraints, or other non-singleton expressions) |
 | value | A simple singleton literal value |
 
 These sentinels apply to `Filter<Name>-><member>` access only and are distinct from [resource attribute error values](resource-metadata.md#error-values).
@@ -198,8 +198,8 @@ match_width = >=2048
 match_format = r8g8b8a8_unorm
 
 [CommandListCheck]
-$w = Filter2k->width          ; -2 (declared but non-singleton: >=2048)
-$f = Filter2k->format         ; format value when match_format is a simple singleton, else -1/-2
+$w = Filter2k->width          ; -5 (declared but non-singleton: >=2048)
+$f = Filter2k->format         ; format value when match_format is a simple singleton, else -1/-5
 $h = Filter2k->height         ; -1 (undeclared)
 $c = Filter2k->confidence     ; 0.75 by default
 `

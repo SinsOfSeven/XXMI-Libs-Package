@@ -883,7 +883,7 @@ public:
 
 	// Value exposed via `Filter->Field` member access:
 	//   -1  undeclared (no constraints)
-	//   -2  declared but complex/non-singleton-literal
+	//   -5  declared but complex/non-singleton-literal
 	//   v   simple singleton literal value
 	float GetMemberValue() const
 	{
@@ -894,7 +894,7 @@ public:
 		if (single_equal_value(&v))
 			return (float)v;
 
-		return -2.0f;
+		return -5.0f;
 	}
 
 	// Matches the field value against a typed resource description. NOTE: Only

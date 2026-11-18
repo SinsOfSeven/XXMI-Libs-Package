@@ -212,7 +212,7 @@ $score = ps-t1->Match(FilterRatio) + ps-t2->Match(FilterIndex)
 Filter sections also expose their declared fields in expressions as `Filter<Name>-><member>` (for example `Filter2k->width`, `Filter2k->format`). For description and draw-call fields this returns:
 
 * `-1` if the field is undeclared
-* `-2` if the field is declared but complex/non-singleton-literal
+* `-5` if the field is declared but complex/non-singleton-literal
 * the field's literal value if it is a simple singleton
 
 `->confidence` returns the filter's perceptual confidence value directly. These sentinels apply to `Filter<Name>-><member>` access only and are distinct from the [error values](#error-values) returned by resource attribute getters.
