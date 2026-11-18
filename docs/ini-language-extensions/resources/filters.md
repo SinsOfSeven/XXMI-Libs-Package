@@ -8,7 +8,8 @@ Filter constraints are split into separate matching paths:
 
 * **Description** (`match_type`, `match_format`, dimensions, flags, etc.) - matched against a resource description (or a custom resource's declared description).
 * **Draw call** (`match_first_*`, `match_*_count`) - matched against the current draw call context.
-* **Perceptual hash** (`match_dhash`, `match_confidence`) - used by slot-filter/hamming distance matching paths, not by `->Match(...)`.
+* **Identity hash** (`match_hash`) - exact orig resource hash (CRC32) selector, used by slot-filter replacement.
+* **Perceptual hash** (`match_dhash`, `match_confidence`) - perceptual/dhash selector, used by slot-filter replacement (and hamming distance matching), not by `->Match(...)`.
 
 For each named filter leaf in a `->Match(...)` expression, description and draw-call constraints are evaluated as separate paths and both must match (draw constraints additionally require a draw call context).
 
@@ -88,16 +89,48 @@ Filters can additionally require values from the current draw call, so a filter 
 
 These use the same numeric grammar. If any draw condition is present and the command list is not running inside a draw call, the filter does not match.
 
-## Perceptual hash fields
+## Hash fields
 
-These fields drive perceptual (dhash/hamming distance) filter matching paths, such as slot-filter matching used with texture tracking/hamming distance operations. They are independent from `->Match(...)` description/draw evaluation.
+These fields drive filter-based slot replacement (`ps-t[FilterName] = ...`, pixel-shader texture slots). They are independent from `->Match(...)` description/draw evaluation.
 
 | Key | Meaning |
 | --- | --- |
+| `match_hash` | Exact orig resource hash (CRC32, 8 hex digits) |
 | `match_dhash` | Reference perceptual hash |
-| `match_confidence` | Minimum required match confidence (clamped to `0.0`-`1.0`, default `0.75`) |
+| `match_confidence` | Minimum required match confidence for perceptual matching (clamped to `0.0`-`1.0`, default `0.75`) |
 
-When a filter is used in a slot-filter/hamming path, a **simple singleton** `match_format` constraint can act as an SRV format pre-gate (slots with a different format are skipped early). If `match_format` is undeclared or declared with a complex/non-singleton constraint, no format equality pre-gate is applied there.
+`match_hash` compares against the resource's original/tracked hash when that hash is reliable for this method (the underlying resource has not changed / hash info is not contaminated). Unreliable hashes are never tested.
+
+When a filter is used for slot-filter matching, a **simple singleton** `match_format` constraint can act as an SRV format pre-gate (slots with a different format are skipped early). If `match_format` is undeclared or declared with a complex/non-singleton constraint, no format equality pre-gate is applied there.
+
+## Slot-filter replacement (`ps-t[Filter]`)
+
+A named filter can be used as the selector in a pixel-shader texture slot assignment:
+
+```ini
+[FilterDiffuse]
+match_hash = 3ed22aab
+
+[TextureOverrideMarker]
+hash = 29d03f40
+ps-t[FilterDiffuse] = ref ResourceDiffuse
+```
+
+This replaces matching initial `ps-t` slots in the current draw with the assigned resource (similar in intent to `checktextureoverride` + hash-based texture overrides, but driven by filters).
+
+### Eligibility and gates
+
+- The filter must declare at least one identity selector: `match_hash` and/or `match_dhash`. **Desc/draw-only filters are not allowed** for slot-filter replacement.
+- Description constraints (`match_*` desc fields) and draw-call constraints (`match_*` draw/count/first fields) are optional additional **AND gates**. If draw constraints are declared, a draw call context is required for a match.
+
+### Reliability and selector preference
+
+- If the slot resource's orig hash is **reliable** (underlying resource has not changed for this method), hash matching is preferred and may be used.
+- If the slot resource's orig hash is **not reliable**, hash matching is **never** used for this method and `match_dhash` (if declared) is used instead.
+- If both `match_hash` and `match_dhash` are declared and the orig hash is reliable, a **hash mismatch is not a failure**: the filter also checks `match_dhash` to be sure. A reliable hash match is treated as an exact/deterministic match; a match decided by `match_dhash` is ranked by Hamming distance within `match_confidence`.
+- A filter that declares only `match_hash` cannot match slots whose orig hash is not reliable.
+
+Slot-filter replacement is script/order-controlled: each `ps-t[Filter] = ...` operation applies its selected matches for that operation in command-list order (so later operations, including same-tier matches, can override earlier ones in the same draw). Per-filter match evaluation/selection rules above still apply (e.g. hash/dhash fallback by reliability, draw/desc gates, and dhash matches selected at the filter's best distance within the pass). Mixed-strategy details may be refined in future revisions.
 
 ## Matching custom resources
 

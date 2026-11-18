@@ -862,6 +862,26 @@ uint32_t GetResourceHash(ID3D11Resource *resource)
 	return 0;
 }
 
+bool IsOrigHashReliable(ID3D11Resource *resource, uint32_t *out_orig_hash)
+{
+	uint32_t orig_hash = GetOrigResourceHash(resource);
+
+	if (out_orig_hash)
+		*out_orig_hash = orig_hash;
+
+	if (!orig_hash)
+		return false;
+
+	// mResourceInfo is shared/global state; protect lookup consistently.
+	CriticalSectionGuard(&G->mCriticalSection);
+
+	auto info = G->mResourceInfo.find(orig_hash);
+	if (info == G->mResourceInfo.end())
+		return false;
+
+	return !info->second.hash_contaminated;
+}
+
 static ResourceHandleInfo* FindTrackedTexture2DNoLock(ID3D11Resource* resource)
 {
 	if (!resource)

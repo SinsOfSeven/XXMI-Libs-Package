@@ -38,6 +38,23 @@ $size = ps-t[$index]->Size
 
 > [Input layout](../input-layouts/README.md) overrides require a fixed slot, so `vb[$index]->ElementFormat(...)` is not supported.
 
+## Filter-Based Slot Selector (Pixel Shader)
+
+### `ps-t[FilterName]`
+
+For pixel-shader texture slots, the bracket form can name a `[Filter...]` section instead of a numeric index or range. This finds matching initial `ps-t` slots in the current draw and replaces them with the assigned resource.
+
+```ini
+[FilterDiffuse]
+match_hash = 3ed22aab
+
+[TextureOverrideMarker]
+hash = 29d03f40
+ps-t[FilterDiffuse] = ref ResourceDiffuse
+```
+
+The filter must declare `match_hash` and/or `match_dhash`; description and draw-call `match_*` fields may be used as additional gates. See [Filters - Slot-filter replacement](filters.md#slot-filter-replacement-ps-tfilter) for eligibility, hash reliability, and matching/precedence rules.
+
 ## Slot Ranges
 
 ### `<slot>[$first:$last]`

@@ -636,6 +636,10 @@ uint32_t CalcTexture3DDataHash(const D3D11_TEXTURE3D_DESC *pDesc, const D3D11_SU
 ResourceHandleInfo* GetResourceHandleInfo(ID3D11Resource *resource);
 uint32_t GetOrigResourceHash(ID3D11Resource *resource);
 uint32_t GetResourceHash(ID3D11Resource *resource);
+// True when the resource has a tracked orig hash and its hash info is not
+// contaminated, so the orig hash is reliable as an identity for this method.
+// Optionally returns the orig hash value.
+bool IsOrigHashReliable(ID3D11Resource *resource, uint32_t *out_orig_hash = nullptr);
 static bool CacheBufferData(HackerContext* context, ID3D11Buffer* buffer, ResourceHandleInfo* info);
 void ClearResourceRegionHashCache(ID3D11Resource* resource);
 UINT GetVertexBufferRegionOffset(UINT stride, DrawCallInfo* call_info, UINT byte_offset);

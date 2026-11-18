@@ -6522,7 +6522,11 @@ void ResourceFilter::CopyMetadataFrom(const ResourceFilter& src)
 {
 	is_empty = src.is_empty;
 
+	match_hash = src.match_hash;
+	has_match_hash = src.has_match_hash;
+
 	match_dhash = src.match_dhash;
+	has_match_dhash = src.has_match_dhash;
 	match_confidence = src.match_confidence;
 
 	desc = src.desc;
@@ -9651,22 +9655,6 @@ InitialTexturesSnapshot::~InitialTexturesSnapshot()
 	Clear();
 }
 
-void InitialTexturesSnapshot::ResetMatches()
-{
-	if (!active)
-		return;
-
-	for (UINT slot = first_srv_slot; slot <= last_srv_slot; ++slot)
-	{
-		if (initial_textures[slot])
-		{
-			// Reset the best accepted Hamming distance for this slot.
-			// 65 indicates that no matching filter has been accepted.
-			hamming_distance[slot] = 65;
-		}
-	}
-}
-
 // Release the references acquired by the most recent snapshot and reset its state.
 void InitialTexturesSnapshot::Clear()
 {
@@ -9681,10 +9669,6 @@ void InitialTexturesSnapshot::Clear()
 			// Release the reference acquired by PSGetShaderResources.
 			initial_textures[slot]->Release();
 			initial_textures[slot] = nullptr;
-
-			// Reset the best accepted Hamming distance for this slot.
-			// 65 indicates that no matching filter has been accepted.
-			hamming_distance[slot] = 65;
 		}
 	}
 
@@ -9779,14 +9763,6 @@ void InitialTexturesSnapshot::SnapshotInitialTextures(CommandListState* state)
 		// PSGetShaderResources AddRefs each returned non-null view.
 		// These references are retained by the cache until next SnapshotInitialTextures or Clear.
 		state->mOrigContext1->PSGetShaderResources(first, count, initial_textures.data() + first);
-
-		// Initialize the best Hamming distance for each captured, non-null initial SRV.
-		// A value of 65 means no filter has matched yet.
-		for (UINT i = first; i < first + count; ++i)
-		{
-			if (initial_textures[i])
-				hamming_distance[i] = 65;
-		}
 	}
 }
 
@@ -9861,112 +9837,52 @@ void RestoreInitialTexturesOperation::run(CommandListState* state)
 
 		initial_resource->Release();
 	}
-
-	// All SRV slots were reset to initial textures, any existing matches data is now obsolete.
-	snapshot.ResetMatches();
 }
 
-// Calculate the Hamming distance between a filter and each captured
-// initial SRV whose format matches the filter.
-// Returns the smallest valid distance, or 65 if no comparison succeeds.
-unsigned FindBestMatchingTextureDistance(CommandListState* state, ResourceFilter* slot_filter, std::array<uint8_t, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>& distances)
+// Test resource-description constraints for a slot filter against a live resource.
+// If the filter has no desc constraints this is a pass (desc is an optional gate).
+static bool SlotFilterMatchesDesc(ResourceFilter* slot_filter, ID3D11Resource* resource)
 {
-	// Initialize every slot as having no valid comparison.
-	// This also excludes undeclared slots and slots without initial SRVs.
-	distances.fill(65);
+	if (!slot_filter || slot_filter->desc.empty())
+		return true;
 
-	InitialTexturesSnapshot& snapshot = state->mHackerContext->GetInitialTexturesSnapshot();
+	D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+	resource->GetType(&dimension);
 
-	unsigned best_distance = 65;
-
-	for (UINT slot = snapshot.first_srv_slot; slot <= snapshot.last_srv_slot; ++slot)
-	{
-		ID3D11ShaderResourceView* initial_srv = snapshot.initial_textures[slot];
-
-		// Only slots containing an initial SRV can participate in matching.
-		if (!initial_srv)
-			continue;
-
-		// If a simple singleton format is provided, skip slot on format mismatch.
-		// Complex/undeclared format constraints are not pre-gated here and are left
-		// to filter/match evaluation paths.
-		DXGI_FORMAT filter_format = DXGI_FORMAT_UNKNOWN;
-		if (slot_filter->TryGetFormatSingleton(&filter_format))
-		{
-			// Only compare textures with the same SRV format as the filter.
-			D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-			initial_srv->GetDesc(&srv_desc);
-
-			if (srv_desc.Format != filter_format)
-				continue;
+	switch (dimension) {
+		case D3D11_RESOURCE_DIMENSION_BUFFER: {
+			D3D11_BUFFER_DESC desc = {};
+			static_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
+			return slot_filter->desc.matches_desc(&desc);
 		}
-
-		// Retrieve the initial resource so its dHash can be calculated.
-		ID3D11Resource* initial_resource = nullptr;
-		initial_srv->GetResource(&initial_resource);
-
-		if (!initial_resource)
-			continue;
-
-		uint64_t initial_dhash = 0;
-
-		// Calculate the initial texture's dHash and compare it with the filter's precomputed match_dhash.
-		const bool has_dhash = GetDhash(state->mHackerContext, initial_resource, G->dhash_mip_size, G->dhash_allow_rehash, initial_dhash, initial_srv);
-
-		initial_resource->Release();
-
-		// A failed dHash calculation makes this slot ineligible for matching.
-		if (!has_dhash)
-			continue;
-
-		// Store this filter's distance for the slot.
-		const unsigned distance = HammingDistance(slot_filter->match_dhash, initial_dhash);
-
-		// Keep track of the smallest valid distance across all eligible slots.
-		distances[slot] = static_cast<uint8_t>(distance);
-
-		if (distance < best_distance)
-			best_distance = distance;
-	}
-
-	return best_distance;
-}
-
-// Replace the initial SRVs whose distance equals the best distance found for the current filter,
-// provided that distance improves on the best distance previously accepted for each individual slot.
-void SlotFilterOperation::ReplaceBestMatchingTextures(
-	CommandListState* state, ID3D11Resource* source_resource, ID3D11View* source_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size, const std::array<uint8_t, SLOT_COUNT>& distances, unsigned best_distance
-)
-{
-	InitialTexturesSnapshot& snapshot = state->mHackerContext->GetInitialTexturesSnapshot();
-
-	for (UINT slot = snapshot.first_srv_slot; slot <= snapshot.last_srv_slot; ++slot)
-	{
-		// Only slots with a captured initial SRV are eligible for replacement.
-		if (!snapshot.initial_textures[slot])
-			continue;
-
-		const uint8_t distance = distances[slot];
-
-		// Replace only slots tied at this filter's global best distance.
-		// Also require the distance to improve on the best match already accepted for this slot during the current draw.
-		if (distance != best_distance || distance >= snapshot.hamming_distance[slot])
-			continue;
-
-		// Configure the inherited destination to target this pixel-shader slot.
-		dst.slot = slot;
-
-		// Use the base resource-copy operation to create and bind the compatible SRV reference in the destination slot.
-		CopyResourceToResource(state, source_resource, source_view, stride, offset, format, buf_size);
-
-		// Record the improved match so a less accurate filter cannot replace it later in the same draw.
-		snapshot.hamming_distance[slot] = distance;
+		case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
+			D3D11_TEXTURE1D_DESC desc = {};
+			static_cast<ID3D11Texture1D*>(resource)->GetDesc(&desc);
+			return slot_filter->desc.matches_desc(&desc);
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
+			D3D11_TEXTURE2D_DESC desc = {};
+			static_cast<ID3D11Texture2D*>(resource)->GetDesc(&desc);
+			return slot_filter->desc.matches_desc(&desc);
+		}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
+			D3D11_TEXTURE3D_DESC desc = {};
+			static_cast<ID3D11Texture3D*>(resource)->GetDesc(&desc);
+			return slot_filter->desc.matches_desc(&desc);
+		}
+		default:
+			return false;
 	}
 }
 
-// Find the best matching initial texture slots for this filter and replace
-// every slot tied at the best distance when the match is within the confidence
-// threshold and improves on that slot's previously accepted match.
+// Find matching initial texture slots for this filter and replace them.
+// Hash and/or dhash identity selectors are required for this method:
+//   - reliable orig hash: prefer hash; if hash mismatches but dhash is declared,
+//     check dhash to be sure (hash mismatch is not a failure in that case)
+//   - unreliable orig hash: never check hash, prefer dhash only
+// Desc/draw constraints act as additional AND gates. Perceptual matches are
+// ranked by Hamming distance (global best, within confidence); reliable hash
+// equality matches are deterministic/exact.
 void SlotFilterOperation::OverrideMatchingTextures(CommandListState* state)
 {
 	if (!state || !state->mHackerContext || !dst.slot_filter)
@@ -9990,20 +9906,147 @@ void SlotFilterOperation::OverrideMatchingTextures(CommandListState* state)
 	}
 
 	ResourceFilter* slot_filter = dst.GetSlotFilter();
+	if (!slot_filter)
+		return;
 
-	// Convert confidence into the maximum acceptable Hamming distance.
-	// For example, 0.75 confidence permits a distance of 16.
-	// The comparison below is inclusive: a distance equal to this limit is accepted.
+	// Slot-filter replacement requires an identity selector (hash and/or dhash).
+	// Desc/draw-only filters are intentionally not eligible for this method.
+	if (!slot_filter->IsSlotFilterEligible())
+	{
+		LogOverlayW(LOG_WARNING, L"Slot filter `%ls` requires match_hash and/or match_dhash; desc/draw-only slot replacement is not allowed\n",
+			slot_filter->name.c_str());
+		return;
+	}
+
+	const bool need_dhash = slot_filter->has_match_dhash;
+	const bool need_desc = !slot_filter->desc.empty();
+	const bool need_draw = slot_filter->draw.has_conditions();
+
+	// Draw constraints are an AND gate; if they don't pass, no slot can match.
+	if (need_draw && !slot_filter->draw.matches(state->call_info))
+		return;
+
 	const unsigned max_distance = static_cast<unsigned>((1.0f - slot_filter->match_confidence) * 64.0f);
 
-	std::array<uint8_t, SLOT_COUNT> distances;
+	enum class PassMatchKind : uint8_t {
+		NONE = 0,
+		// Perceptual (dhash) match ranked by Hamming distance (lower is better).
+		PERCEPTUAL = 1,
+		// Deterministic identity match (e.g. reliable orig hash).
+		EXACT = 2,
+	};
 
-	// Pass 1: calculate the filter's distance against every eligible
-	// initial SRV in the shared snapshot and identify the global best distance.
-	const unsigned best_distance = FindBestMatchingTextureDistance(state, slot_filter, distances);
+	std::array<PassMatchKind, SLOT_COUNT> slot_match_kind{};
+	std::array<uint8_t, SLOT_COUNT> slot_match_distance{};
+	slot_match_kind.fill(PassMatchKind::NONE);
+	slot_match_distance.fill(65);
 
-	// Reject the filter if no valid match was found within the threshold.
-	if (best_distance > max_distance)
+	unsigned best_perceptual_distance = 65;
+	bool has_exact_match = false;
+
+	for (UINT slot = snapshot.first_srv_slot; slot <= snapshot.last_srv_slot; ++slot)
+	{
+		ID3D11ShaderResourceView* initial_srv = snapshot.initial_textures[slot];
+
+		// Only slots containing an initial SRV can participate in matching.
+		if (!initial_srv)
+			continue;
+
+		// If a simple singleton format is provided, skip slot on format mismatch.
+		// Complex/undeclared format constraints are not pre-gated here and are left
+		// to desc/match evaluation.
+		DXGI_FORMAT filter_format = DXGI_FORMAT_UNKNOWN;
+		if (slot_filter->TryGetFormatSingleton(&filter_format))
+		{
+			D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+			initial_srv->GetDesc(&srv_desc);
+
+			if (srv_desc.Format != filter_format)
+				continue;
+		}
+
+		ID3D11Resource* initial_resource = nullptr;
+		initial_srv->GetResource(&initial_resource);
+		if (!initial_resource)
+			continue;
+
+		uint32_t orig_hash = 0;
+		const bool hash_reliable = IsOrigHashReliable(initial_resource, &orig_hash);
+
+		// Decide which identity path(s) apply per policy:
+		// - reliable orig hash: prefer hash; if hash mismatches but dhash is also
+		//   declared, do not fail and check dhash to be sure
+		// - unreliable orig hash: never check hash, prefer dhash only
+		bool try_hash = slot_filter->has_match_hash && hash_reliable;
+		bool try_dhash = need_dhash && (!hash_reliable || !slot_filter->has_match_hash);
+		bool hash_equal = false;
+
+		if (try_hash)
+		{
+			hash_equal = (orig_hash == slot_filter->match_hash);
+			if (!hash_equal && need_dhash)
+				try_dhash = true; // hash mismatch is not a failure when dhash declared
+		}
+
+		// If no applicable identity selector can match this resource, skip early.
+		if (!(hash_equal || try_dhash))
+		{
+			initial_resource->Release();
+			continue;
+		}
+
+		// Desc constraints are an AND gate (evaluated only when needed).
+		if (need_desc && !SlotFilterMatchesDesc(slot_filter, initial_resource))
+		{
+			initial_resource->Release();
+			continue;
+		}
+
+		PassMatchKind kind = PassMatchKind::NONE;
+		uint8_t distance = 0;
+
+		if (hash_equal)
+		{
+			// Reliable hash equality: deterministic/exact match for this method.
+			kind = PassMatchKind::EXACT;
+		}
+		else if (try_dhash)
+		{
+			uint64_t initial_dhash = 0;
+
+			// dHash is computed lazily and only for resources still eligible.
+			if (!GetDhash(state->mHackerContext, initial_resource, G->dhash_mip_size, G->dhash_allow_rehash, initial_dhash, initial_srv))
+			{
+				initial_resource->Release();
+				continue;
+			}
+
+			const unsigned dist = HammingDistance(slot_filter->match_dhash, initial_dhash);
+			if (dist > max_distance)
+			{
+				initial_resource->Release();
+				continue;
+			}
+
+			kind = PassMatchKind::PERCEPTUAL;
+			distance = static_cast<uint8_t>(dist);
+		}
+
+		initial_resource->Release();
+
+		if (kind == PassMatchKind::NONE)
+			continue;
+
+		slot_match_kind[slot] = kind;
+		slot_match_distance[slot] = distance;
+
+		if (kind == PassMatchKind::EXACT)
+			has_exact_match = true;
+		else if (distance < best_perceptual_distance)
+			best_perceptual_distance = distance;
+	}
+
+	if (!has_exact_match && best_perceptual_distance > max_distance)
 		return;
 
 	ID3D11View* source_view = nullptr;
@@ -10020,10 +10063,29 @@ void SlotFilterOperation::OverrideMatchingTextures(CommandListState* state)
 		return;
 	}
 
-	// Pass 2: replace all slots tied at the filter's global best distance.
-	// A slot is updated only when this filter improves on the best distance
-	// already accepted for that slot during the current draw.
-	ReplaceBestMatchingTextures(state, source_resource, source_view, stride, offset, format, buf_size, distances, best_distance);
+	for (UINT slot = snapshot.first_srv_slot; slot <= snapshot.last_srv_slot; ++slot)
+	{
+		if (!snapshot.initial_textures[slot])
+			continue;
+
+		const PassMatchKind kind = slot_match_kind[slot];
+		if (kind == PassMatchKind::NONE)
+			continue;
+
+		if (kind == PassMatchKind::PERCEPTUAL)
+		{
+			// Preserve perceptual selection semantics for this pass: replace only
+			// slots tied at this filter's global best distance.
+			if (slot_match_distance[slot] != best_perceptual_distance)
+				continue;
+		}
+
+		// Configure the inherited destination to target this pixel-shader slot.
+		dst.slot = slot;
+
+		// Use the base resource-copy operation to create and bind the compatible SRV reference in the destination slot.
+		CopyResourceToResource(state, source_resource, source_view, stride, offset, format, buf_size);
+	}
 
 	// Release the temporary references returned while resolving the source.
 	if (source_view)

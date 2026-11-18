@@ -219,23 +219,14 @@ struct InitialTexturesSnapshot
 	// Non-null means that the slot is eligible for matching.
 	std::array<ID3D11ShaderResourceView*, SLOT_COUNT> initial_textures{};
 
-	// Hamming distance accepted for each slot during this draw.
-	std::array<uint8_t, SLOT_COUNT> hamming_distance{};
-
 	bool active = false;
 	unsigned call_number = 0;
 
 	UINT first_srv_slot = 0;
 	UINT last_srv_slot = 0;
 
-	InitialTexturesSnapshot()
-	{
-		hamming_distance.fill(65);
-	}
-
 	~InitialTexturesSnapshot();
 	void Clear();
-	void ResetMatches();
 
 	void SnapshotInitialTextures(CommandListState* state);
 };
@@ -555,8 +546,15 @@ public:
 	wstring name;
 	bool is_empty = true;
 
+	// Exact resource hash matching path (orig/tracked CRC32, distinct from
+	// perceptual dhash and desc/draw matching). Compared only when the slot
+	// resource's orig hash is reliable for this method.
+	uint32_t match_hash = 0;
+	bool has_match_hash = false;
+
 	// Perceptual hash matching path (distinct from desc/draw matching).
 	uint64_t match_dhash = 0;
+	bool has_match_dhash = false;
 	float match_confidence = 0.75f;
 
 	// Rich declarative match criteria: description and draw-call conditions are
@@ -584,6 +582,10 @@ public:
 		TryGetFormatSingleton(&fmt);
 		return fmt;
 	}
+
+	// Slot-filter (ps-t[Filter]) replacement requires an identity selector
+	// (hash and/or dhash). Desc/draw may only act as additional gates.
+	bool IsSlotFilterEligible() const { return has_match_hash || has_match_dhash; }
 
 	ResourceFilter* ResolveFilter();
 	bool SetSource(ResourceFilter* source);
@@ -1575,8 +1577,6 @@ class SlotFilterOperation : public ResourceCopyOperation
 {
 public:
 	static constexpr UINT SLOT_COUNT = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
-
-	void ReplaceBestMatchingTextures(CommandListState* state, ID3D11Resource* source_resource, ID3D11View* source_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size, const std::array<uint8_t, SLOT_COUNT>& distances, unsigned best_distance);
 
 	void OverrideMatchingTextures(CommandListState* state);
 

@@ -2389,7 +2389,14 @@ static ResourceFilter* ParseFilterSection(const wchar_t* section_name)
 	}
 
 	bool found = false;
+	filter->match_hash = (uint32_t)GetIniHash(section_name, L"match_hash", 0, &found);
+	filter->has_match_hash = found;
+	if (found)
+		filter->is_empty = false;
+
+	found = false;
 	filter->match_dhash = GetIniHash(section_name, L"match_dhash", 0, &found);
+	filter->has_match_dhash = found;
 	if (found)
 		filter->is_empty = false;
 
