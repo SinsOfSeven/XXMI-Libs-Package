@@ -299,9 +299,11 @@ struct TextureOverride {
 	bool has_match_priority;
 	int priority;
 
-	// The match_* conditions, both resource description and draw context
-	// fields. This is the same matcher [Filter<Name>] sections use.
-	FilterMatch filter;
+	// The match_* conditions: resource description and draw context fields
+	// are separate matching paths (Option B), sharing the same field/matcher
+	// primitives as [Filter<Name>] sections.
+	FilterMatch desc_match;
+	FilterDrawMatch draw_match;
 
 	CommandList command_list;
 	CommandList post_command_list;

@@ -2305,8 +2305,6 @@ static bool parse_filter_format_field(const wchar_t *section, const wchar_t *key
 
 static ResourceFilter* ParseFilterSection(const wchar_t* section_name)
 {
-	wchar_t setting[MAX_PATH];
-
 	wstring filter_id(section_name);
 
 	// Convert section name to lower case so our keys will be consistent in the unordered_map:
@@ -2315,15 +2313,16 @@ static ResourceFilter* ParseFilterSection(const wchar_t* section_name)
 	ResourceFilter* filter = &resourceFilters[filter_id];
 	filter->name = filter_id;
 
-	bool rich_match = false;
+	bool desc_declared = false;
+	bool draw_declared = false;
 
 	int ival = GetIniEnum(section_name, L"match_type",
 			D3D11_RESOURCE_DIMENSION_UNKNOWN, NULL,
 			L"D3D11_RESOURCE_DIMENSION_", ResourceDimensions,
 			ARRAYSIZE(ResourceDimensions), 1);
 	if (ival != D3D11_RESOURCE_DIMENSION_UNKNOWN) {
-		filter->match.set_resource_type((D3D11_RESOURCE_DIMENSION)ival);
-		rich_match = true;
+		filter->desc.set_resource_type((D3D11_RESOURCE_DIMENSION)ival);
+		desc_declared = true;
 	}
 
 	ival = GetIniEnum(section_name, L"match_usage", -1, NULL, L"D3D11_USAGE_",
@@ -2332,65 +2331,61 @@ static ResourceFilter* ParseFilterSection(const wchar_t* section_name)
 		FuzzyMatch matcher;
 		matcher.op = FuzzyMatchOp::EQUAL;
 		matcher.val = ival;
-		filter->match.Usage.add(matcher);
-		rich_match = true;
+		filter->desc.Usage.add(matcher);
+		desc_declared = true;
 	}
 
-	if (parse_filter_flags_field(section_name, L"match_bind_flags", &filter->match.BindFlags, CustomResourceBindFlagNames))
-		rich_match = true;
-	if (parse_filter_flags_field(section_name, L"match_cpu_access_flags", &filter->match.CPUAccessFlags, ResourceCPUAccessFlagNames))
-		rich_match = true;
-	if (parse_filter_flags_field(section_name, L"match_misc_flags", &filter->match.MiscFlags, ResourceMiscFlagNames))
-		rich_match = true;
+	if (parse_filter_flags_field(section_name, L"match_bind_flags", &filter->desc.BindFlags, CustomResourceBindFlagNames))
+		desc_declared = true;
+	if (parse_filter_flags_field(section_name, L"match_cpu_access_flags", &filter->desc.CPUAccessFlags, ResourceCPUAccessFlagNames))
+		desc_declared = true;
+	if (parse_filter_flags_field(section_name, L"match_misc_flags", &filter->desc.MiscFlags, ResourceMiscFlagNames))
+		desc_declared = true;
 
-	DXGI_FORMAT rich_format = DXGI_FORMAT_UNKNOWN;
-	if (parse_filter_format_field(section_name, L"match_format", &filter->match.Format, &rich_format)) {
-		rich_match = true;
-		// Preserve master slot-filter/hammingdistance format gate semantics.
-		if (rich_format != DXGI_FORMAT_UNKNOWN) {
-			filter->match_format = rich_format;
-			LogInfo("  match_format=%s\n", TexFormatStr(filter->match_format));
-			filter->is_empty = false;
-		}
+	if (parse_filter_format_field(section_name, L"match_format", &filter->desc.Format, nullptr)) {
+		desc_declared = true;
+		DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+		if (filter->TryGetFormatSingleton(&fmt))
+			LogInfo("  match_format=%s\n", TexFormatStr(fmt));
 	}
 
-	if (parse_filter_numeric_field(section_name, L"match_byte_width", &filter->match.ByteWidth))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_stride", &filter->match.StructureByteStride))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_mips", &filter->match.MipLevels))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_width", &filter->match.Width))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_height", &filter->match.Height))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_depth", &filter->match.Depth))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_array", &filter->match.ArraySize))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_msaa", &filter->match.SampleDesc_Count))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_msaa_quality", &filter->match.SampleDesc_Quality))
-		rich_match = true;
+	if (parse_filter_numeric_field(section_name, L"match_byte_width", &filter->desc.ByteWidth))
+		desc_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_stride", &filter->desc.StructureByteStride))
+		desc_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_mips", &filter->desc.MipLevels))
+		desc_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_width", &filter->desc.Width))
+		desc_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_height", &filter->desc.Height))
+		desc_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_depth", &filter->desc.Depth))
+		desc_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_array", &filter->desc.ArraySize))
+		desc_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_msaa", &filter->desc.SampleDesc_Count))
+		desc_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_msaa_quality", &filter->desc.SampleDesc_Quality))
+		desc_declared = true;
 
-	if (parse_filter_numeric_field(section_name, L"match_first_vertex", &filter->match.FirstVertex))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_first_index", &filter->match.FirstIndex))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_first_instance", &filter->match.FirstInstance))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_vertex_count", &filter->match.VertexCount))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_index_count", &filter->match.IndexCount))
-		rich_match = true;
-	if (parse_filter_numeric_field(section_name, L"match_instance_count", &filter->match.InstanceCount))
-		rich_match = true;
+	if (parse_filter_numeric_field(section_name, L"match_first_vertex", &filter->draw.FirstVertex))
+		draw_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_first_index", &filter->draw.FirstIndex))
+		draw_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_first_instance", &filter->draw.FirstInstance))
+		draw_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_vertex_count", &filter->draw.VertexCount))
+		draw_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_index_count", &filter->draw.IndexCount))
+		draw_declared = true;
+	if (parse_filter_numeric_field(section_name, L"match_instance_count", &filter->draw.InstanceCount))
+		draw_declared = true;
 
-	if (rich_match) {
+	if (desc_declared || draw_declared)
 		filter->is_empty = false;
-		if (!filter->match.update_types_matched()) {
-			IniWarningW(L"Filter section can never match any resources\n - [%ls]\n", section_name);
-		}
+
+	if (desc_declared && !filter->desc.update_types_matched()) {
+		IniWarningW(L"Filter section can never match any resources\n - [%ls]\n", section_name);
 	}
 
 	bool found = false;
@@ -3447,13 +3442,14 @@ static void parse_texture_override_common(const wchar_t *id, TextureOverride *ov
 	override->expand_region_copy = GetIniBool(id, L"expand_region_copy", false, NULL);
 	override->deny_cpu_read = GetIniBool(id, L"deny_cpu_read", false, NULL);
 
-	// Draw call context matching (shared with [Filter<Name>] sections):
-	parse_filter_numeric_field(id, L"match_first_vertex", &override->filter.FirstVertex);
-	parse_filter_numeric_field(id, L"match_first_index", &override->filter.FirstIndex);
-	parse_filter_numeric_field(id, L"match_first_instance", &override->filter.FirstInstance);
-	parse_filter_numeric_field(id, L"match_vertex_count", &override->filter.VertexCount);
-	parse_filter_numeric_field(id, L"match_index_count", &override->filter.IndexCount);
-	parse_filter_numeric_field(id, L"match_instance_count", &override->filter.InstanceCount);
+	// Draw call context matching (separate matching path, shared primitives
+	// with [Filter<Name>] sections):
+	parse_filter_numeric_field(id, L"match_first_vertex", &override->draw_match.FirstVertex);
+	parse_filter_numeric_field(id, L"match_first_index", &override->draw_match.FirstIndex);
+	parse_filter_numeric_field(id, L"match_first_instance", &override->draw_match.FirstInstance);
+	parse_filter_numeric_field(id, L"match_vertex_count", &override->draw_match.VertexCount);
+	parse_filter_numeric_field(id, L"match_index_count", &override->draw_match.IndexCount);
+	parse_filter_numeric_field(id, L"match_instance_count", &override->draw_match.InstanceCount);
 
 	ParseCommandList(id, &override->command_list, &override->post_command_list, TextureOverrideIniKeys, register_command_lists);
 }
@@ -3549,13 +3545,13 @@ static void parse_texture_override_fuzzy_match(const wchar_t *section)
 	int ival;
 
 	fuzzy = new FuzzyMatchResourceDesc(section);
-	FilterMatch *filter = &fuzzy->texture_override->filter;
+	FilterMatch *desc = &fuzzy->texture_override->desc_match;
 
 	ival = GetIniEnum(section, L"match_type",
 			D3D11_RESOURCE_DIMENSION_UNKNOWN, &found,
 			L"D3D11_RESOURCE_DIMENSION_", ResourceDimensions,
 			ARRAYSIZE(ResourceDimensions), 1);
-	filter->set_resource_type((D3D11_RESOURCE_DIMENSION)ival);
+	desc->set_resource_type((D3D11_RESOURCE_DIMENSION)ival);
 
 	// We always use match_usage=default if it is not explicitly specified,
 	// since forcing the stereo mode doesn't make much sense for other
@@ -3573,29 +3569,29 @@ static void parse_texture_override_fuzzy_match(const wchar_t *section)
 		FuzzyMatch matcher;
 		matcher.op = FuzzyMatchOp::EQUAL;
 		matcher.val = ival;
-		filter->Usage.add(matcher);
+		desc->Usage.add(matcher);
 	}
 
 	// Flags:
-	parse_filter_flags_field(section, L"match_bind_flags", &filter->BindFlags, CustomResourceBindFlagNames);
-	parse_filter_flags_field(section, L"match_cpu_access_flags", &filter->CPUAccessFlags, ResourceCPUAccessFlagNames);
-	parse_filter_flags_field(section, L"match_misc_flags", &filter->MiscFlags, ResourceMiscFlagNames);
+	parse_filter_flags_field(section, L"match_bind_flags", &desc->BindFlags, CustomResourceBindFlagNames);
+	parse_filter_flags_field(section, L"match_cpu_access_flags", &desc->CPUAccessFlags, ResourceCPUAccessFlagNames);
+	parse_filter_flags_field(section, L"match_misc_flags", &desc->MiscFlags, ResourceMiscFlagNames);
 
 	// Format:
-	parse_filter_format_field(section, L"match_format", &filter->Format, nullptr);
+	parse_filter_format_field(section, L"match_format", &desc->Format, nullptr);
 
 	// Resource description numerics:
-	parse_filter_numeric_field(section, L"match_byte_width", &filter->ByteWidth);
-	parse_filter_numeric_field(section, L"match_stride", &filter->StructureByteStride);
-	parse_filter_numeric_field(section, L"match_mips", &filter->MipLevels);
-	parse_filter_numeric_field(section, L"match_width", &filter->Width);
-	parse_filter_numeric_field(section, L"match_height", &filter->Height);
-	parse_filter_numeric_field(section, L"match_depth", &filter->Depth);
-	parse_filter_numeric_field(section, L"match_array", &filter->ArraySize);
-	parse_filter_numeric_field(section, L"match_msaa", &filter->SampleDesc_Count);
-	parse_filter_numeric_field(section, L"match_msaa_quality", &filter->SampleDesc_Quality);
+	parse_filter_numeric_field(section, L"match_byte_width", &desc->ByteWidth);
+	parse_filter_numeric_field(section, L"match_stride", &desc->StructureByteStride);
+	parse_filter_numeric_field(section, L"match_mips", &desc->MipLevels);
+	parse_filter_numeric_field(section, L"match_width", &desc->Width);
+	parse_filter_numeric_field(section, L"match_height", &desc->Height);
+	parse_filter_numeric_field(section, L"match_depth", &desc->Depth);
+	parse_filter_numeric_field(section, L"match_array", &desc->ArraySize);
+	parse_filter_numeric_field(section, L"match_msaa", &desc->SampleDesc_Count);
+	parse_filter_numeric_field(section, L"match_msaa_quality", &desc->SampleDesc_Quality);
 
-	if (!filter->update_types_matched()) {
+	if (!desc->update_types_matched()) {
 		IniWarningW(L"Section can never match any resources\n - [%ls]\n", section);
 		delete fuzzy;
 		return;
@@ -3614,7 +3610,7 @@ static void warn_if_duplicate_texture_hash(TextureOverride *override, uint32_t h
 	TextureOverrideMap::iterator i;
 	TextureOverrideList::iterator j;
 
-	if (override->filter.has_draw_conditions() || override->has_match_priority)
+	if (override->draw_match.has_conditions() || override->has_match_priority)
 		return;
 
 	i = lookup_textureoverride(hash);
@@ -3629,7 +3625,7 @@ static void warn_if_duplicate_texture_hash(TextureOverride *override, uint32_t h
 		// 1. Fuzzy resource description matching (no hash - will have bailed above)
 		// 2. Draw context matching
 		// 3. Whenever a match_priority has been specified
-		if (j->filter.has_draw_conditions() || j->has_match_priority)
+		if (j->draw_match.has_conditions() || j->has_match_priority)
 			continue;
 
 		IniWarningW(L"Possible Mod Conflict: Duplicate TextureOverride hash=%08lx\n"
@@ -4615,12 +4611,12 @@ void BuildTextureOverrideDrawMaps()
 		for (TextureOverride& ov : list)
 		{
 			UINT index_count;
-			if (ov.filter.IndexCount.single_equal_value(&index_count)) {
+			if (ov.draw_match.IndexCount.single_equal_value(&index_count)) {
 				G->mTextureOverrideDrawIndexMap[index_count].emplace_back(TextureOverrideFuzzyMatch{ hash, const_cast<TextureOverride*>(&ov) });
 				continue;
 			}
 			UINT vertex_count;
-			if (ov.filter.VertexCount.single_equal_value(&vertex_count)) {
+			if (ov.draw_match.VertexCount.single_equal_value(&vertex_count)) {
 				G->mTextureOverrideDrawVertexMap[vertex_count].emplace_back(TextureOverrideFuzzyMatch{ hash, const_cast<TextureOverride*>(&ov) });
 				continue;
 			}

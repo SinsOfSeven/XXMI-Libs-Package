@@ -1,8 +1,16 @@
 # Filters
 
-A `[Filter<Name>]` section declaratively describes **which resources a piece of logic is interested in**. Unlike a fuzzy `[TextureOverride]`, a filter is pure — it does not map to a shader override, it simply evaluates to `1.0` (match) or `0.0` (no match) when a command list runs against a resource.
+A `[Filter<Name>]` section declaratively describes **which resources a piece of logic is interested in**. Unlike a fuzzy `[TextureOverride]`, a filter is pure - it does not map to a shader override, it simply evaluates to `1.0` (match) or `0.0` (no match) when a command list runs against a resource.
 
 A filter is evaluated with the `->Match(<expression>)` resource member, which can be used anywhere an expression is accepted. It accepts a single filter name, a raw resource hash, or a boolean expression combining several of them, so resources can be tested directly, combined, or composed into a score.
+
+Filter constraints are split into separate matching paths:
+
+* **Description** (`match_type`, `match_format`, dimensions, flags, etc.) - matched against a resource description (or a custom resource's declared description).
+* **Draw call** (`match_first_*`, `match_*_count`) - matched against the current draw call context.
+* **Perceptual hash** (`match_dhash`, `match_confidence`) - used by slot-filter/hamming distance matching paths, not by `->Match(...)`.
+
+For each named filter leaf in a `->Match(...)` expression, description and draw-call constraints are evaluated as separate paths and both must match (draw constraints additionally require a draw call context).
 
 ## Declaring a filter
 
@@ -80,9 +88,20 @@ Filters can additionally require values from the current draw call, so a filter 
 
 These use the same numeric grammar. If any draw condition is present and the command list is not running inside a draw call, the filter does not match.
 
+## Perceptual hash fields
+
+These fields drive perceptual (dhash/hamming distance) filter matching paths, such as slot-filter matching used with texture tracking/hamming distance operations. They are independent from `->Match(...)` description/draw evaluation.
+
+| Key | Meaning |
+| --- | --- |
+| `match_dhash` | Reference perceptual hash |
+| `match_confidence` | Minimum required match confidence (clamped to `0.0`-`1.0`, default `0.75`) |
+
+When a filter is used in a slot-filter/hamming path, a **simple singleton** `match_format` constraint can act as an SRV format pre-gate (slots with a different format are skipped early). If `match_format` is undeclared or declared with a complex/non-singleton constraint, no format equality pre-gate is applied there.
+
 ## Matching custom resources
 
-Filters can be evaluated against `[Resource...]` custom resources as well as live pipeline resources. In that case the filter matches the resource's **declared** description (`type`, `format`, `width`, `height`, `mips`, `array`, `msaa`, `byte_width`, `stride`, `bind_flags`, `misc_flags`), so a filter can identify a custom resource before it is ever substantiated.
+Filters can be evaluated against `[Resource...]` custom resources as well as live pipeline resources. In that case the filter matches the resource's **declared** description (`type`, `format`, `width`, `height`, `mips`, `array`, `msaa`, `byte_width`, `stride`, `bind_flags`, `misc_flags`), so a filter can identify a custom resource before it is ever substantiated. Raw hash literals in `->Match(...)` do not match custom resources.
 
 ## Defaults
 
@@ -132,9 +151,64 @@ $is_either = ps-t0->Match(1234abcd | 89abcdef)
 
 8 digits match the current 32-bit texture hash (compared against the resource hash); 16 digits are reserved for the future shader hash. A purely hexadecimal token is never ambiguous with a filter name because a name always carries the `Filter` prefix, which contains non-hex letters. Custom resources (`[Resource...]`) are not content-hashed, so hash literals never match against them.
 
+## Filter field members
+
+A filter's declared fields can be read in expressions as `Filter<Name>-><member>`. This exposes the filter's own constraint metadata (not a matched resource's runtime attributes).
+
+For description and draw-call fields, member access returns a sentinel/value:
+
+| Result | Meaning |
+| --- | --- |
+| `-1` | Undeclared - the field has no constraints |
+| `-2` | Declared but complex/non-singleton-literal - the field cannot be represented as a single plain literal value (for example ranges, multiple/ANDed constraints, or other non-singleton expressions) |
+| value | A simple singleton literal value |
+
+These sentinels apply to `Filter<Name>-><member>` access only and are distinct from [resource attribute error values](resource-metadata.md#error-values).
+
+Supported members:
+
+| Member | Path | Corresponding `match_*` key |
+| --- | --- | --- |
+| `usage` | Desc | `match_usage` |
+| `bind_flags` | Desc | `match_bind_flags` |
+| `cpu_access_flags` | Desc | `match_cpu_access_flags` |
+| `misc_flags` | Desc | `match_misc_flags` |
+| `byte_width` | Desc | `match_byte_width` |
+| `stride` | Desc | `match_stride` |
+| `mips` | Desc | `match_mips` |
+| `format` | Desc | `match_format` |
+| `width` | Desc | `match_width` |
+| `height` | Desc | `match_height` |
+| `depth` | Desc | `match_depth` |
+| `array` | Desc | `match_array` |
+| `msaa` | Desc | `match_msaa` |
+| `msaa_quality` | Desc | `match_msaa_quality` |
+| `first_vertex` | Draw | `match_first_vertex` |
+| `first_index` | Draw | `match_first_index` |
+| `first_instance` | Draw | `match_first_instance` |
+| `vertex_count` | Draw | `match_vertex_count` |
+| `index_count` | Draw | `match_index_count` |
+| `instance_count` | Draw | `match_instance_count` |
+| `confidence` | Perceptual | `match_confidence` (returned as the confidence value, not a sentinel-based field value) |
+
+`ini
+[Filter2k]
+match_type = Texture2D
+match_width = >=2048
+match_format = r8g8b8a8_unorm
+
+[CommandListCheck]
+$w = Filter2k->width          ; -2 (declared but non-singleton: >=2048)
+$f = Filter2k->format         ; format value when match_format is a simple singleton, else -1/-2
+$h = Filter2k->height         ; -1 (undeclared)
+$c = Filter2k->confidence     ; 0.75 by default
+`
+
 ## Usage
 
 `Resource->Match(<expression>)` is an expression operand, where `Resource` is any resource target (`ps-t0`, `ResourceFoo`, `PoolFoo[0]`, …) and `<expression>` is a filter name, a raw resource hash, or a boolean expression over any of them (see [Composing filters](#composing-filters) and [Matching raw hashes](#matching-raw-hashes)). It evaluates to `1.0` on a match, `0.0` when the resource is bound but does not match, and `-0.0` when the resource cannot be resolved (for example an unbound pipeline slot).
+
+For each named filter leaf, the filter's description and draw-call matching paths must both pass (draw constraints require a draw call context). Raw hash leaves compare the resource hash only.
 
 ```ini
 [CommandListSelect]
@@ -159,7 +233,7 @@ See the [Resource Metadata](resource-metadata.md#match) documentation for the `-
 
 ## Relationship to fuzzy texture overrides
 
-Filters and fuzzy `[TextureOverride]` sections share a single matching implementation: a `[TextureOverride]`'s conditions are stored in the exact same `FilterMatch` structure a `[Filter<Name>]` section uses (`TextureOverride::filter`). As a result, the same `match_*` fields and the same numeric grammar apply to both, and a `[TextureOverride]` can now combine constraints just like a filter:
+Filters and fuzzy `[TextureOverride]` sections share the same matching primitives and `match_*` grammar. A fuzzy `[TextureOverride]` stores its conditions as separate **description** and **draw-call** match paths (matching how `[Filter<Name>]` sections are split), so description fields drive candidate selection/caching while draw conditions are evaluated per draw call:
 
 ```ini
 [TextureOverrideExample]
@@ -168,4 +242,4 @@ match_height = >100 & <500
 match_index_count = >=6
 ```
 
-The differences are only in what the section *does* once it matches (a `[TextureOverride]` applies its command lists; a `[Filter]` evaluates to `1.0`/`0.0`) and in the defaults: a fuzzy `[TextureOverride]` defaults `match_usage=default`, whereas a filter does not.
+The differences are only in what the section *does* once it matches (a `[TextureOverride]` applies its command lists; a `[Filter]` evaluates to `1.0`/`0.0` or participates in slot/hamming matching) and in the defaults: a fuzzy `[TextureOverride]` defaults `match_usage=default`, whereas a filter does not.

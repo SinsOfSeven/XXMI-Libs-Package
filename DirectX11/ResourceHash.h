@@ -881,6 +881,22 @@ public:
 		return true;
 	}
 
+	// Value exposed via `Filter->Field` member access:
+	//   -1  undeclared (no constraints)
+	//   -2  declared but complex/non-singleton-literal
+	//   v   simple singleton literal value
+	float GetMemberValue() const
+	{
+		if (values.empty())
+			return -1.0f;
+
+		UINT v = 0;
+		if (single_equal_value(&v))
+			return (float)v;
+
+		return -2.0f;
+	}
+
 	// Matches the field value against a typed resource description. NOTE: Only
 	// safe to instantiate in translation units where FuzzyMatch::matches is
 	// defined (i.e. ResourceHash.cpp), so keep the call sites of these out of
@@ -909,11 +925,35 @@ private:
 	std::vector<FuzzyMatch> values;
 };
 
-// A set of constraints on resource descriptions (and optionally the draw
-// context) that can be evaluated against a live D3D11 resource or the declared
-// fields of a custom resource. Used by [Filter<Name>] sections (via
-// `->Match(<expression>)`) and, after unification, by fuzzy [TextureOverride]
-// match conditions.
+// Draw-call constraints for a filter/texture override. This is a separate
+// matching path from resource description matching (Option B): desc matching is
+// used for candidate selection/caching, draw matching is evaluated per draw.
+class FilterDrawMatch {
+public:
+	FilterField FirstVertex;
+	FilterField FirstIndex;
+	FilterField FirstInstance;
+	FilterField VertexCount;
+	FilterField IndexCount;
+	FilterField InstanceCount;
+
+	bool empty() const
+	{
+		return FirstVertex.empty() && FirstIndex.empty() && FirstInstance.empty()
+		    && VertexCount.empty() && IndexCount.empty() && InstanceCount.empty();
+	}
+
+	// True if any draw context field is constrained.
+	bool has_conditions() const { return !empty(); }
+	// Evaluates draw context fields against the current draw call. Returns true
+	// when there are no draw conditions at all.
+	bool matches(const DrawCallInfo *call_info) const;
+};
+
+// A set of constraints on resource descriptions that can be evaluated against a
+// live D3D11 resource or the declared fields of a custom resource. Used by
+// [Filter<Name>] sections (via `->Match(<expression>)`) and, after unification,
+// by fuzzy [TextureOverride] description matching.
 class FilterMatch {
 public:
 	bool matches_buffer = true;
@@ -936,38 +976,22 @@ public:
 	FilterField SampleDesc_Count;    //    2D
 	FilterField SampleDesc_Quality;  //    2D
 
-	// Draw context fields, evaluated against the DrawCallInfo of the current
-	// command list run (e.g. match_index_count = >6):
-	FilterField FirstVertex;
-	FilterField FirstIndex;
-	FilterField FirstInstance;
-	FilterField VertexCount;
-	FilterField IndexCount;
-	FilterField InstanceCount;
-
 	FilterMatch() = default;
-	bool matches(const D3D11_BUFFER_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const D3D11_TEXTURE1D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const D3D11_TEXTURE2D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const D3D11_TEXTURE3D_DESC *desc, const DrawCallInfo *call_info) const;
-	bool matches(const CustomResource *resource, const DrawCallInfo *call_info) const;
+	bool matches(const D3D11_BUFFER_DESC *desc) const;
+	bool matches(const D3D11_TEXTURE1D_DESC *desc) const;
+	bool matches(const D3D11_TEXTURE2D_DESC *desc) const;
+	bool matches(const D3D11_TEXTURE3D_DESC *desc) const;
+	bool matches(const CustomResource *resource) const;
 
-	// Description-only match, ignoring any draw context conditions. Used to
-	// build the per-resource fuzzy candidate cache, which is filtered per draw
-	// with matches_draw_conditions() afterwards:
-	bool matches_desc(const D3D11_BUFFER_DESC *desc) const;
-	bool matches_desc(const D3D11_TEXTURE1D_DESC *desc) const;
-	bool matches_desc(const D3D11_TEXTURE2D_DESC *desc) const;
-	bool matches_desc(const D3D11_TEXTURE3D_DESC *desc) const;
+	// Description-only match (alias for matches(desc)).
+	bool matches_desc(const D3D11_BUFFER_DESC *desc) const { return matches(desc); }
+	bool matches_desc(const D3D11_TEXTURE1D_DESC *desc) const { return matches(desc); }
+	bool matches_desc(const D3D11_TEXTURE2D_DESC *desc) const { return matches(desc); }
+	bool matches_desc(const D3D11_TEXTURE3D_DESC *desc) const { return matches(desc); }
 
 	void set_resource_type(D3D11_RESOURCE_DIMENSION type);
 	bool update_types_matched();
-
-	// True if any draw context field is constrained.
-	bool has_draw_conditions() const;
-	// Evaluates the draw context fields against the current draw call. Returns
-	// true when there are no draw conditions at all.
-	bool matches_draw_conditions(const DrawCallInfo *call_info) const;
+	bool empty() const;
 };
 
 // Composes [Filter<Name>] sections with the boolean operators accepted inside
@@ -993,8 +1017,9 @@ class FilterExpr {
 public:
 	FilterExprOp op = FilterExprOp::LEAF;
 
-	// Set for LEAF: points to the named filter's match criteria.
-	const FilterMatch *leaf = nullptr;
+	// Set for LEAF: points to the named filter's desc and draw match criteria.
+	const FilterMatch *leaf_desc = nullptr;
+	const FilterDrawMatch *leaf_draw = nullptr;
 
 	// Set for HASH: a raw resource/texture hash literal.
 	uint64_t hash = 0;
@@ -1012,9 +1037,10 @@ public:
 	bool matches(const uint64_t *resource_hash, const CustomResource *resource, const DrawCallInfo *call_info) const;
 };
 
-// A thin owner for a fuzzy [TextureOverride]. All match state lives in
-// TextureOverride::filter (a FilterMatch), so this type only exists to keep the
-// owning pointer used by G->mFuzzyTextureOverrides (and its sorted set) stable.
+// A thin owner for a fuzzy [TextureOverride]. Match state lives in the
+// TextureOverride's desc/draw match fields, so this type only exists to keep
+// the owning pointer used by G->mFuzzyTextureOverrides (and its sorted set)
+// stable.
 class FuzzyMatchResourceDesc {
 public:
 	struct TextureOverride *texture_override;

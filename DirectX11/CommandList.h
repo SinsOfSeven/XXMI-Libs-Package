@@ -555,14 +555,35 @@ public:
 	wstring name;
 	bool is_empty = true;
 
+	// Perceptual hash matching path (distinct from desc/draw matching).
 	uint64_t match_dhash = 0;
-	DXGI_FORMAT match_format = DXGI_FORMAT_UNKNOWN;
 	float match_confidence = 0.75f;
 
-	// Rich declarative match criteria for `->Match(<expression>)` and unified
-	// filter matching. Resolved expression leaves point at this member on the
-	// named filter in `resourceFilters`.
-	FilterMatch match;
+	// Rich declarative match criteria: description and draw-call conditions are
+	// separate matching paths (Option B). Resolved expression leaves point at
+	// these members on the named filter in `resourceFilters`.
+	FilterMatch desc;
+	FilterDrawMatch draw;
+
+	// Derived format gate: returns true only when desc.Format is a simple
+	// singleton literal (used for slot-filter/hamming SRV format pre-gate).
+	bool TryGetFormatSingleton(DXGI_FORMAT *out) const
+	{
+		UINT v = 0;
+		if (!desc.Format.single_equal_value(&v))
+			return false;
+		*out = (DXGI_FORMAT)v;
+		return true;
+	}
+
+	// Format singleton as stored/queried value, or DXGI_FORMAT_UNKNOWN when not
+	// a simple singleton (undeclared or complex).
+	DXGI_FORMAT GetFormatSingleton() const
+	{
+		DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+		TryGetFormatSingleton(&fmt);
+		return fmt;
+	}
 
 	ResourceFilter* ResolveFilter();
 	bool SetSource(ResourceFilter* source);
@@ -1267,17 +1288,61 @@ static EnumName_t<const wchar_t*, ResourceFilterTargetType> ResourceFilterTypeNa
 };
 
 enum class ResourceFilterTargetEvaluationMode : uint32_t {
-	INVALID         = 0b00000000000000000000000000000000,
+	INVALID             = 0,
 
-	FILTER_IDENTITY = 0b00000000000000000000000000000001,
-	FORMAT          = 0b00000000000000000000000000000010,
-	CONFIDENCE      = 0b00000000000000000000000000000100,
+	FILTER_IDENTITY     = 1u << 0,
+	FORMAT              = 1u << 1,
+	CONFIDENCE          = 1u << 2,
+
+	// Desc match fields
+	USAGE               = 1u << 3,
+	BIND_FLAGS          = 1u << 4,
+	CPU_ACCESS_FLAGS    = 1u << 5,
+	MISC_FLAGS          = 1u << 6,
+	BYTE_WIDTH          = 1u << 7,
+	STRIDE              = 1u << 8,
+	MIPS                = 1u << 9,
+	WIDTH               = 1u << 10,
+	HEIGHT              = 1u << 11,
+	DEPTH               = 1u << 12,
+	ARRAY               = 1u << 13,
+	MSAA                = 1u << 14,
+	MSAA_QUALITY        = 1u << 15,
+
+	// Draw match fields
+	FIRST_VERTEX        = 1u << 16,
+	FIRST_INDEX         = 1u << 17,
+	FIRST_INSTANCE      = 1u << 18,
+	VERTEX_COUNT        = 1u << 19,
+	INDEX_COUNT         = 1u << 20,
+	INSTANCE_COUNT      = 1u << 21,
 };
 SENSIBLE_ENUM(ResourceFilterTargetEvaluationMode);
 static EnumName_t<const wchar_t*, ResourceFilterTargetEvaluationMode> ResourceFilterTargetEvaluationModeNames[] = {
 	{L"FilterIdentity", ResourceFilterTargetEvaluationMode::FILTER_IDENTITY},
 	{L"Format", ResourceFilterTargetEvaluationMode::FORMAT},
 	{L"Confidence", ResourceFilterTargetEvaluationMode::CONFIDENCE},
+
+	{L"Usage", ResourceFilterTargetEvaluationMode::USAGE},
+	{L"BindFlags", ResourceFilterTargetEvaluationMode::BIND_FLAGS},
+	{L"CPUAccessFlags", ResourceFilterTargetEvaluationMode::CPU_ACCESS_FLAGS},
+	{L"MiscFlags", ResourceFilterTargetEvaluationMode::MISC_FLAGS},
+	{L"ByteWidth", ResourceFilterTargetEvaluationMode::BYTE_WIDTH},
+	{L"Stride", ResourceFilterTargetEvaluationMode::STRIDE},
+	{L"Mips", ResourceFilterTargetEvaluationMode::MIPS},
+	{L"Width", ResourceFilterTargetEvaluationMode::WIDTH},
+	{L"Height", ResourceFilterTargetEvaluationMode::HEIGHT},
+	{L"Depth", ResourceFilterTargetEvaluationMode::DEPTH},
+	{L"Array", ResourceFilterTargetEvaluationMode::ARRAY},
+	{L"MSAA", ResourceFilterTargetEvaluationMode::MSAA},
+	{L"MSAAQuality", ResourceFilterTargetEvaluationMode::MSAA_QUALITY},
+
+	{L"FirstVertex", ResourceFilterTargetEvaluationMode::FIRST_VERTEX},
+	{L"FirstIndex", ResourceFilterTargetEvaluationMode::FIRST_INDEX},
+	{L"FirstInstance", ResourceFilterTargetEvaluationMode::FIRST_INSTANCE},
+	{L"VertexCount", ResourceFilterTargetEvaluationMode::VERTEX_COUNT},
+	{L"IndexCount", ResourceFilterTargetEvaluationMode::INDEX_COUNT},
+	{L"InstanceCount", ResourceFilterTargetEvaluationMode::INSTANCE_COUNT},
 
 	{NULL, ResourceFilterTargetEvaluationMode::INVALID} // End of list marker
 };

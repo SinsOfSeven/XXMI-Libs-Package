@@ -3381,11 +3381,52 @@ float CommandListOperand::process_resource_filter(CommandListState* state)
 	case ResourceFilterTargetEvaluationMode::FILTER_IDENTITY:
 		return filter_target.GetFilterId(state);
 
-	case ResourceFilterTargetEvaluationMode::FORMAT:
-		return (float)resource_filter->match_format;
-
 	case ResourceFilterTargetEvaluationMode::CONFIDENCE:
 		return (float)resource_filter->match_confidence;
+
+	// Desc fields (sentinel: -1 undeclared, -2 complex, value for singleton)
+	case ResourceFilterTargetEvaluationMode::FORMAT:
+		return resource_filter->desc.Format.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::USAGE:
+		return resource_filter->desc.Usage.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::BIND_FLAGS:
+		return resource_filter->desc.BindFlags.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::CPU_ACCESS_FLAGS:
+		return resource_filter->desc.CPUAccessFlags.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::MISC_FLAGS:
+		return resource_filter->desc.MiscFlags.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::BYTE_WIDTH:
+		return resource_filter->desc.ByteWidth.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::STRIDE:
+		return resource_filter->desc.StructureByteStride.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::MIPS:
+		return resource_filter->desc.MipLevels.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::WIDTH:
+		return resource_filter->desc.Width.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::HEIGHT:
+		return resource_filter->desc.Height.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::DEPTH:
+		return resource_filter->desc.Depth.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::ARRAY:
+		return resource_filter->desc.ArraySize.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::MSAA:
+		return resource_filter->desc.SampleDesc_Count.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::MSAA_QUALITY:
+		return resource_filter->desc.SampleDesc_Quality.GetMemberValue();
+
+	// Draw fields
+	case ResourceFilterTargetEvaluationMode::FIRST_VERTEX:
+		return resource_filter->draw.FirstVertex.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::FIRST_INDEX:
+		return resource_filter->draw.FirstIndex.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::FIRST_INSTANCE:
+		return resource_filter->draw.FirstInstance.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::VERTEX_COUNT:
+		return resource_filter->draw.VertexCount.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::INDEX_COUNT:
+		return resource_filter->draw.IndexCount.GetMemberValue();
+	case ResourceFilterTargetEvaluationMode::INSTANCE_COUNT:
+		return resource_filter->draw.InstanceCount.GetMemberValue();
 	}
 
 	return 0.0f;
@@ -6482,10 +6523,10 @@ void ResourceFilter::CopyMetadataFrom(const ResourceFilter& src)
 	is_empty = src.is_empty;
 
 	match_dhash = src.match_dhash;
-	match_format = src.match_format;
 	match_confidence = src.match_confidence;
 
-	match = src.match;
+	desc = src.desc;
+	draw = src.draw;
 }
 
 IniParserResult ResourceFilterTarget::ParseTargetPrefix(const wchar_t*& target, size_t& length)
@@ -6506,12 +6547,33 @@ IniParserResult ResourceFilterTarget::ParseTargetMember(
 {
 	//LogInfo("ResourceFilterTarget::ParseTargetMember: target=%ls, length=%d\n", target, length);
 
-	if (length < 15) // Smallest possible match is "filtera->format".
+	// Smallest possible match is e.g. "f->mips" (7 chars) but filter name must
+	// exist; keep a low bound and let member matching decide.
+	if (length < 7)
 		return IniParserResult::TOKEN_NOT_FOUND;
 
 	static constexpr MemberInfo members[] = {
-		{ L"->format",      8, ResourceFilterTargetEvaluationMode::FORMAT },
-		{ L"->confidence", 12, ResourceFilterTargetEvaluationMode::CONFIDENCE },
+		{ L"->mips",             6, ResourceFilterTargetEvaluationMode::MIPS },
+		{ L"->msaa",             6, ResourceFilterTargetEvaluationMode::MSAA },
+		{ L"->array",            7, ResourceFilterTargetEvaluationMode::ARRAY },
+		{ L"->depth",            7, ResourceFilterTargetEvaluationMode::DEPTH },
+		{ L"->usage",            7, ResourceFilterTargetEvaluationMode::USAGE },
+		{ L"->width",            7, ResourceFilterTargetEvaluationMode::WIDTH },
+		{ L"->format",           8, ResourceFilterTargetEvaluationMode::FORMAT },
+		{ L"->height",           8, ResourceFilterTargetEvaluationMode::HEIGHT },
+		{ L"->stride",           8, ResourceFilterTargetEvaluationMode::STRIDE },
+		{ L"->byte_width",      12, ResourceFilterTargetEvaluationMode::BYTE_WIDTH },
+		{ L"->bind_flags",      12, ResourceFilterTargetEvaluationMode::BIND_FLAGS },
+		{ L"->confidence",      12, ResourceFilterTargetEvaluationMode::CONFIDENCE },
+		{ L"->misc_flags",      12, ResourceFilterTargetEvaluationMode::MISC_FLAGS },
+		{ L"->index_count",     13, ResourceFilterTargetEvaluationMode::INDEX_COUNT },
+		{ L"->first_index",     13, ResourceFilterTargetEvaluationMode::FIRST_INDEX },
+		{ L"->msaa_quality",    14, ResourceFilterTargetEvaluationMode::MSAA_QUALITY },
+		{ L"->vertex_count",    14, ResourceFilterTargetEvaluationMode::VERTEX_COUNT },
+		{ L"->first_vertex",    14, ResourceFilterTargetEvaluationMode::FIRST_VERTEX },
+		{ L"->instance_count",  16, ResourceFilterTargetEvaluationMode::INSTANCE_COUNT },
+		{ L"->first_instance",  16, ResourceFilterTargetEvaluationMode::FIRST_INSTANCE },
+		{ L"->cpu_access_flags",17, ResourceFilterTargetEvaluationMode::CPU_ACCESS_FLAGS },
 	};
 
 	return SyntaxTarget::ParseTargetMember(members, target, length, temp_target, evaluation_mode, ini_namespace, scope);
@@ -8853,7 +8915,9 @@ private:
 		if (it != resourceFilters.end()) {
 			std::shared_ptr<FilterExpr> node = std::make_shared<FilterExpr>();
 			node->op = FilterExprOp::LEAF;
-			node->leaf = &it->second.ResolveFilter()->match;
+			ResourceFilter *resolved = it->second.ResolveFilter();
+			node->leaf_desc = &resolved->desc;
+			node->leaf_draw = &resolved->draw;
 			return node;
 		}
 
@@ -9823,14 +9887,17 @@ unsigned FindBestMatchingTextureDistance(CommandListState* state, ResourceFilter
 		if (!initial_srv)
 			continue;
 
-		// If match_format is provided, skip slot on format mismatch.
-		if (slot_filter->match_format != DXGI_FORMAT_UNKNOWN)
+		// If a simple singleton format is provided, skip slot on format mismatch.
+		// Complex/undeclared format constraints are not pre-gated here and are left
+		// to filter/match evaluation paths.
+		DXGI_FORMAT filter_format = DXGI_FORMAT_UNKNOWN;
+		if (slot_filter->TryGetFormatSingleton(&filter_format))
 		{
 			// Only compare textures with the same SRV format as the filter.
 			D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
 			initial_srv->GetDesc(&srv_desc);
 
-			if (srv_desc.Format != slot_filter->match_format)
+			if (srv_desc.Format != filter_format)
 				continue;
 		}
 

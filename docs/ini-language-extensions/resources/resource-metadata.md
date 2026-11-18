@@ -203,9 +203,21 @@ Because it is an ordinary expression operand it can be composed with arithmetic,
 $score = ps-t1->Match(FilterRatio) + ps-t2->Match(FilterIndex)
 ```
 
-`->Match(...)` resolves the underlying resource (or the *declared* description of a custom resource) and applies the filter's resource and draw call constraints without any GPU readback. See [Filters](filters.md) for the `[Filter<Name>]` section syntax and supported `match_*` fields.
+`->Match(...)` resolves the underlying resource (or the *declared* description of a custom resource) and applies the filter's description and draw-call constraints as separate matching paths; for each named filter leaf, both must match (draw constraints require a draw call context). Raw hash leaves compare the resource hash only (8/16-hex literals compared against the 32-bit resource hash, zero-extended as needed) and do not match custom resources. No GPU readback is performed. See [Filters](filters.md) for the `[Filter<Name>]` section syntax and supported `match_*` fields.
 
 > `->Match(...)` is only valid as an expression operand and cannot be used as a command argument target or an assignment destination.
+
+### Filter field members
+
+Filter sections also expose their declared fields in expressions as `Filter<Name>-><member>` (for example `Filter2k->width`, `Filter2k->format`). For description and draw-call fields this returns:
+
+* `-1` if the field is undeclared
+* `-2` if the field is declared but complex/non-singleton-literal
+* the field's literal value if it is a simple singleton
+
+`->confidence` returns the filter's perceptual confidence value directly. These sentinels apply to `Filter<Name>-><member>` access only and are distinct from the [error values](#error-values) returned by resource attribute getters.
+
+See [Filters - Filter field members](filters.md#filter-field-members) for the full member list and semantics.
 
 ### Performance
 
